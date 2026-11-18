@@ -1,7 +1,7 @@
 {
   "name": "steamback",
-  "version": "1.2.2",
-  "description": "中文 Steam 存档备份：按游戏开启、自选路径、固定与备注",
+  "version": "1.3.0",
+  "description": "中文游戏存档管理：手动备份、自选路径、固定置顶、重命名与备注",
   "scripts": {
     "build": "npm run typecheck && rollup -c",
     "watch": "rollup -c -w",

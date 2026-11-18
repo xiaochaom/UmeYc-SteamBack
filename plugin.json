@@ -7,7 +7,7 @@
       "steamback",
       "backup"
     ],
-    "description": "中文存档备份：按游戏开启，支持自选存档、固定、备注和手动删除",
+    "description": "中文游戏存档管理：手动备份、自选路径、固定置顶、重命名、备注和删除",
     "image": "https://raw.githubusercontent.com/geeksville/steamback/main/assets/screenshot.png"
   },
   "api_version": 1

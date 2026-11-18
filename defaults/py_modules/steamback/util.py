@@ -1,8 +1,6 @@
 import psutil
 import re
-import asyncio
 
-from typing import NamedTuple
 from . import Engine
 
 """Create a game info object: contains game_id and install_root
@@ -58,49 +56,3 @@ def find_running_games() -> list[int]:
         except (psutil.AccessDenied, psutil.NoSuchProcess):
             pass  # Windows won't let us see some processes
     return r
-
-
-class CheckResult(NamedTuple):
-    game_started: bool  # true if there is a game just started
-    backed_up: list[dict]  # the games we just backed up (probably only 0 or 1)
-
-
-"""Watch steam and allow async polling for game exit
-"""
-
-
-class SteamWatcher:
-    def __init__(self, engine: Engine):
-        self.was_running = set()
-        self.engine = engine
-
-    """Look for any game exits and return the saveinfo for any backups performed
-    """
-    async def check_once(self) -> CheckResult:
-        running = set(find_running_games())
-
-        # set of games that just started
-        started = running - self.was_running
-
-        # set of games that just stopped
-        stopped = self.was_running - running
-
-        backups = []
-        for game_id in stopped:
-            if game_id not in self.engine.get_enabled_games():
-                continue
-            info = make_game_info(self.engine, game_id)
-            b = await self.engine.do_backup(info, automatic=True)
-            if b is not None:
-                backups.append(b)
-
-        # get ready for next time
-        self.was_running = running
-        return CheckResult(game_started=len(started) > 0, backed_up=backups)
-
-    async def run_forever(self):
-        self.engine.config.logger.info(
-            "正在监测已开启备份的游戏，按 Ctrl-C 退出…")
-        while True:
-            await asyncio.sleep(5)
-            await self.check_once()

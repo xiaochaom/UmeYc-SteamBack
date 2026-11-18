@@ -25,24 +25,34 @@ class Backups(unittest.IsolatedAsyncioTestCase):
         self.game = {"game_id": 42, "game_name": "测试游戏", "install_root": self.config.steam_dir}
         self.engine.set_custom_game(self.game, [str(self.source)])
 
+    async def test_snapshot_name_preserves_identity_timestamp_and_pin(self):
+        save = await self.snapshot("chapter")
+        updated = await self.engine.update_snapshot(save["filename"], True, "中文备注", "首领前")
+        self.assertEqual(updated["name"], "首领前")
+        self.assertEqual(updated["timestamp"], save["timestamp"])
+        self.assertEqual(updated["filename"], save["filename"])
+        self.assertTrue(updated["pinned"])
+        updated = await self.engine.update_snapshot(save["filename"], False, "中文备注")
+        self.assertEqual(updated["name"], "首领前")
+        self.assertEqual((await Engine(self.config).get_saveinfos())[0]["name"], "首领前")
+        with self.assertRaises(ValueError):
+            await self.engine.update_snapshot(save["filename"], False, "", "x" * 101)
+        await self.engine.do_restore({"filename": save["filename"]})
+
     async def snapshot(self, text):
         self.file.write_text(text, encoding="utf-8")
         result = await self.engine.do_backup(self.game)
         self.assertIsNotNone(result)
         return result
 
-    async def test_auto_backup_requires_explicit_enable_and_persists(self):
-        self.assertEqual(self.engine.get_enabled_games(), [])
-        self.assertIsNone(await self.engine.do_backup(self.game, automatic=True))
-        self.assertEqual(await self.engine.get_saveinfos(), [])
-        self.engine.set_game_enabled(42, True)
-        restarted = Engine(self.config)
-        self.assertEqual(restarted.get_enabled_games(), [42])
-        self.assertIsNotNone(await restarted.do_backup(self.game, automatic=True))
-        restarted.set_game_enabled(42, False)
-        self.file.write_text("第二章", encoding="utf-8")
-        self.assertIsNone(await restarted.do_backup(self.game, automatic=True))
-        self.assertIsNotNone(await restarted.do_backup(self.game))
+    async def test_old_auto_setting_has_no_effect_and_manual_clicks_always_save(self):
+        self.data.mkdir(exist_ok=True)
+        (self.data / "enabled_games.json").write_text("[42]")
+        self.assertFalse(hasattr(self.engine, "set_game_enabled"))
+        first = await self.engine.do_backup(self.game)
+        second = await self.engine.do_backup(self.game)
+        self.assertNotEqual(first["filename"], second["filename"])
+        self.assertEqual(len(await self.engine.get_saveinfos()), 2)
 
     async def test_noncloud_multi_directory_and_same_parent_files(self):
         second = self.root / "另一个目录"
@@ -68,27 +78,25 @@ class Backups(unittest.IsolatedAsyncioTestCase):
     async def test_unchanged_and_backdated_content(self):
         await self.snapshot("aaaa")
         old_stat = self.file.stat()
-        self.assertIsNone(await self.engine.do_backup(self.game))
+        self.assertIsNotNone(await self.engine.do_backup(self.game))
         self.file.write_text("bbbb")
         os.utime(self.file, ns=(old_stat.st_atime_ns, old_stat.st_mtime_ns))
         self.assertIsNotNone(await self.engine.do_backup(self.game))
 
-    async def test_pin_does_not_consume_quota_and_survives_restart(self):
-        self.engine.max_saves = 2
+    async def test_all_backups_kept_and_pin_survives_restart(self):
         pinned = await self.snapshot("fixed")
         await self.engine.update_snapshot(pinned["filename"], True, "击败首领之前")
-        for index in range(5):
+        for index in range(15):
             await self.snapshot(str(index))
         saves = await self.engine.get_saveinfos()
-        self.assertEqual(len(saves), 3)
-        self.assertEqual(sum(not s["pinned"] for s in saves), 2)
+        self.assertEqual(len(saves), 16)
+        self.assertEqual(sum(not s["pinned"] for s in saves), 15)
         restarted = Engine(self.config)
         fixed = next(s for s in await restarted.get_saveinfos() if s["pinned"])
         self.assertEqual(fixed["note"], "击败首领之前")
         self.assertEqual(fixed["timestamp"], pinned["timestamp"])
 
-    async def test_unpin_defers_deletion_until_next_roll(self):
-        self.engine.max_saves = 2
+    async def test_unpin_never_deletes_even_after_new_backup(self):
         pinned = await self.snapshot("fixed")
         await self.engine.update_snapshot(pinned["filename"], True, "备注")
         await self.snapshot("new 1")
@@ -97,8 +105,22 @@ class Backups(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(await self.engine.get_saveinfos()), 3)
         await self.snapshot("new 3")
         saves = await self.engine.get_saveinfos()
-        self.assertEqual(len(saves), 2)
-        self.assertNotIn(pinned["filename"], [s["filename"] for s in saves])
+        self.assertEqual(len(saves), 4)
+        self.assertIn(pinned["filename"], [s["filename"] for s in saves])
+
+    async def test_restores_preserve_every_undo_and_existing_snapshot(self):
+        original = await self.snapshot("original")
+        for index in range(12):
+            self.file.write_text(f"before restore {index}")
+            await self.engine.do_restore({"filename": original["filename"]})
+        saves = await self.engine.get_saveinfos()
+        self.assertEqual(len(saves), 13)
+        self.assertEqual(sum(s["is_undo"] for s in saves), 12)
+        self.assertIn(original["filename"], [s["filename"] for s in saves])
+        undo = next(s for s in saves if s["is_undo"])
+        updated = await self.engine.update_snapshot(undo["filename"], True, "restore safety", "恢复前")
+        self.assertTrue(updated["pinned"])
+        self.assertEqual(updated["name"], "恢复前")
 
     async def test_manual_deletion_including_pinned_leaves_live_files(self):
         save = await self.snapshot("kept live")
@@ -110,8 +132,7 @@ class Backups(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.file.read_text(), "kept live")
         self.assertEqual(list((self.data / "saves2").iterdir()), [])
 
-    async def test_retention_is_per_game(self):
-        self.engine.max_saves = 1
+    async def test_backing_up_other_game_keeps_existing_backups(self):
         first = await self.snapshot("first")
         other = dict(self.game, game_id=43)
         self.engine.set_custom_game(other, [str(self.source)])

@@ -1,4 +1,4 @@
-"""中文桌面界面，与 Decky 插件共用备份、固定和滚动清理逻辑。"""
+"""中文桌面界面，与 Decky 插件共用手动备份与固定逻辑。"""
 import asyncio
 import datetime
 import tkinter as tk
@@ -17,7 +17,6 @@ class GUI:
     def __init__(self, root, engine):
         self.root = root
         self.engine = engine
-        self.watcher = util.SteamWatcher(engine)
         self.saves = {}
         self.games = {}
         self.available = set()
@@ -26,17 +25,16 @@ class GUI:
         root.minsize(900, 500)
         self.status = ttk.Label(root, text="正在识别游戏存档…", wraplength=1000)
         self.status.pack(side=tk.BOTTOM, fill=tk.X, padx=12, pady=8)
-        ttk.Label(root, text="自动备份默认关闭，请按游戏开启。每款游戏保留最近 10 个普通备份，固定存档不占名额。解除固定后，下次滚动清理时再处理。",
+        ttk.Label(root, text="全部手动备份；所有记录持续保留，只有手动删除才移除。固定存档置顶显示。",
                   wraplength=1000).pack(fill=tk.X, padx=12, pady=10)
         panels = ttk.Panedwindow(root, orient=tk.HORIZONTAL)
         panels.pack(fill=tk.BOTH, expand=True, padx=12)
         left, right = ttk.Frame(panels), ttk.Frame(panels)
         panels.add(left, weight=1)
         panels.add(right, weight=2)
-        self.game_tree = self.tree(left, ("游戏", "自动备份", "识别状态"), (200, 85, 150))
-        self.save_tree = self.tree(right, ("游戏", "备份时间", "类型", "备注"), (180, 165, 90, 240))
+        self.game_tree = self.tree(left, ("游戏", "识别状态"), (200, 150))
+        self.save_tree = self.tree(right, ("游戏", "存档名称", "备份时间", "类型", "备注"), (160, 140, 165, 90, 200))
         for label, callback in [
-            ("开启 / 关闭自动备份", self.toggle_game),
             ("选择存档路径", self.configure),
             ("添加游戏（输入 ID）", self.add_game),
             ("立即备份", async_handler(self.backup)),
@@ -46,7 +44,7 @@ class GUI:
         for label, callback in [
             ("恢复所选存档 / 撤销恢复", async_handler(self.restore)),
             ("固定 / 解除固定", async_handler(self.toggle_pin)),
-            ("编辑备注并固定", async_handler(self.edit_note)),
+            ("编辑名称与备注", async_handler(self.edit_note)),
             ("删除所选备份", async_handler(self.delete)),
         ]:
             ttk.Button(right, text=label, command=callback).pack(fill=tk.X, pady=3)
@@ -82,20 +80,6 @@ class GUI:
         self.status.config(text=f"操作失败：{error}")
         messagebox.showerror("操作失败", str(error), parent=self.root)
 
-    def toggle_game(self):
-        game = self.game()
-        if game:
-            try:
-                enabled = self.engine.get_enabled_games()
-                if game["game_id"] not in enabled and game["game_id"] not in self.available:
-                    messagebox.showinfo("选择存档", "尚未识别到存档，请先选择文件或文件夹。", parent=self.root)
-                    self.configure(game)
-                    return
-                self.engine.set_game_enabled(game["game_id"], game["game_id"] not in enabled)
-                asyncio.create_task(self.refresh())
-            except Exception as error:
-                self.error(error)
-
     def add_game(self):
         game_id = simpledialog.askinteger("添加游戏", "输入 Steam 游戏或非 Steam 快捷方式 ID：", minvalue=1, parent=self.root)
         if game_id is None:
@@ -112,7 +96,7 @@ class GUI:
         dialog = tk.Toplevel(self.root)
         dialog.title(f'选择「{game["game_name"]}」存档')
         dialog.geometry("760x420")
-        ttk.Label(dialog, text="可选择多个存档文件或文件夹。保存路径不会自动开启备份。\n移除全部路径后保存，可恢复云存档自动识别。").pack(padx=12, pady=12)
+        ttk.Label(dialog, text="可选择多个存档文件或文件夹。点击“立即备份”保存当前进度。\n移除全部路径后保存，可恢复云存档自动识别。").pack(padx=12, pady=12)
         listing = tk.Listbox(dialog)
         listing.pack(fill=tk.BOTH, expand=True, padx=12)
         for path in paths:
@@ -152,7 +136,7 @@ class GUI:
         if game:
             try:
                 saved = await self.engine.do_backup(game)
-                self.status.config(text="备份完成" if saved else "暂无变化或没有可备份的文件")
+                self.status.config(text="备份完成" if saved else "没有可备份的文件")
                 await self.refresh_saves()
             except Exception as error:
                 self.error(error)
@@ -175,7 +159,7 @@ class GUI:
 
     async def toggle_pin(self):
         save = self.save()
-        if save and not save["is_undo"]:
+        if save:
             try:
                 await self.engine.update_snapshot(save["filename"], not save["pinned"], save["note"])
                 await self.refresh_saves()
@@ -184,11 +168,14 @@ class GUI:
 
     async def edit_note(self):
         save = self.save()
-        if save and not save["is_undo"]:
-            note = simpledialog.askstring("固定存档备注", "输入备注（最多 500 字）：", initialvalue=save["note"], parent=self.root)
+        if save:
+            name = simpledialog.askstring("存档名称", "输入存档名称（最多 100 字）：", initialvalue=save.get("name", ""), parent=self.root)
+            if name is None:
+                return
+            note = simpledialog.askstring("存档备注", "输入备注（最多 500 字）：", initialvalue=save["note"], parent=self.root)
             if note is not None:
                 try:
-                    await self.engine.update_snapshot(save["filename"], True, note)
+                    await self.engine.update_snapshot(save["filename"], save["pinned"], note, name)
                     await self.refresh_saves()
                 except Exception as error:
                     self.error(error)
@@ -210,8 +197,8 @@ class GUI:
         self.save_tree.delete(*self.save_tree.get_children())
         for save in saves:
             self.save_tree.insert("", tk.END, iid=save["filename"], values=(
-                save["game_info"]["game_name"], saveinfo_ago_str(save),
-                "固定存档" if save["pinned"] else "撤销备份" if save["is_undo"] else "滚动备份", save["note"]))
+                save["game_info"]["game_name"], save.get("name", ""), saveinfo_ago_str(save),
+                "固定存档" if save["pinned"] else "撤销备份" if save["is_undo"] else "普通备份", save["note"]))
         if selected and selected[0] in self.saves:
             self.save_tree.selection_set(selected)
 
@@ -224,41 +211,26 @@ class GUI:
             self.engine.all_games = games
             supported = await self.engine.find_supported(list(games.values()))
             self.available = {g["game_id"] for g in supported}
-            enabled = self.engine.get_enabled_games()
             self.game_tree.delete(*self.game_tree.get_children())
             for game in sorted(games.values(), key=lambda g: g["game_name"]):
                 self.game_tree.insert("", tk.END, iid=str(game["game_id"]), values=(
-                    game["game_name"], "已开启" if game["game_id"] in enabled else "已关闭",
+                    game["game_name"],
                     "已识别" if game["game_id"] in self.available else "请自行选择存档"))
             if selected and int(selected[0]) in games:
                 self.game_tree.selection_set(selected)
             await self.refresh_saves()
-            self.status.config(text="正在监测已开启备份的游戏…")
+            self.status.config(text="选择游戏后点击“立即备份”保存进度")
         except Exception as error:
             self.error(error)
 
     async def run(self):
         await self.refresh()
-        async def watch():
-            while True:
-                await asyncio.sleep(5)
-                try:
-                    result = await self.watcher.check_once()
-                    if result.backed_up:
-                        await self.refresh_saves()
-                        self.status.config(text="游戏已退出，自动备份完成")
-                except Exception as error:
-                    self.status.config(text=f"自动备份失败：{error}")
-        task = asyncio.create_task(watch())
         try:
             while self.root.winfo_exists():
                 self.root.update()
                 await asyncio.sleep(0.05)
         except tk.TclError:
             pass
-        finally:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
 
 
 def run(engine):

@@ -9,7 +9,6 @@ async def testImpl(p: Engine):
 
     p.add_account_id(49847735)
     # print(f'Initial saveinfos { await p.get_saveinfos() }')
-    p.ignore_unchanged = False  # Force backup for testing
 
     # Test find_supported
     supported = await p.find_supported(p.all_games.values())
@@ -66,9 +65,9 @@ async def testImpl(p: Engine):
     si = await p.do_backup(make_game_info(p, 648800))
     assert si is not None
 
-    p.ignore_unchanged = True  # following backup should be skipped because no changes
+    # Manual backups create a snapshot even when the data is unchanged.
     si = await p.do_backup(valheim)
-    assert si is None
+    assert si is not None
 
     # Test a game that should not exist
     si = await p.do_backup(make_game_info(p, 555))

@@ -37,24 +37,6 @@ def safe_file(root, relative):
 
 
 class CustomSaves:
-    def get_enabled_games(self):
-        path = Path(self.config.app_data_dir) / "enabled_games.json"
-        if not path.exists():
-            return []
-        with path.open(encoding="utf-8") as stream:
-            return json.load(stream)
-
-    def set_game_enabled(self, game_id, enabled):
-        if not isinstance(enabled, bool) or not isinstance(game_id, int) or game_id <= 0:
-            raise ValueError("游戏 ID 或开关状态无效")
-        games = set(self.get_enabled_games())
-        if enabled:
-            games.add(game_id)
-        else:
-            games.discard(game_id)
-        write_json(Path(self.config.app_data_dir) / "enabled_games.json", sorted(games))
-        return sorted(games)
-
     def get_custom_games(self):
         path = Path(self.config.app_data_dir) / "custom_games.json"
         if not path.exists():

@@ -77,10 +77,7 @@ class Engine(CustomSaves):
         self.all_games = None
         self.account_ids: set[int] = set()
         self.dry_run = False  # Set to true to suppress 'real' writes to directories
-        self.max_saves = 10  # default to a max of ten saves
 
-        # don't generate backups if the files haven't changed since last backup
-        self.ignore_unchanged = True
 
     def add_account_id(self, id_num: int):
         logger.debug(f'设置 Steam 账号：{id_num}')
@@ -584,6 +581,7 @@ class Engine(CustomSaves):
                 raise
             si.setdefault("pinned", False)
             si.setdefault("note", "")
+            si.setdefault("name", "")
             return si
 
     """ delete the savedir and associated json
@@ -594,7 +592,7 @@ class Engine(CustomSaves):
         self._validate_filename(filename)
         metadata = os.path.join(root, filename + ".json")
         if not allow_pinned and os.path.isfile(metadata) and self._file_to_saveinfo(filename + ".json")["pinned"]:
-            raise ValueError("固定存档不能被自动删除")
+            raise ValueError("固定存档只能通过确认后的手动删除移除")
 
         # Make sure saves dir is a valid absolute path before we start doing dangerous things
         assert os.path.isabs(root)
@@ -612,26 +610,6 @@ class Engine(CustomSaves):
                 shutil.rmtree(f)
 
     """
-    we keep only the most recent undo and the most recent 10 saves
-    """
-    async def _cull_old_saves(self):
-        infos = await self.get_saveinfos()
-
-        undos = [i for i in infos if i["is_undo"] and not i["pinned"]]
-        saves = [i for i in infos if not i["is_undo"] and not i["pinned"]]
-
-        def delete_oldest(files, to_keep):
-            while len(files) > to_keep:
-                todel = files.pop()
-                logger.info(f'滚动清理旧备份：{todel}')
-                # if not self.dry_run: we ignore dryrun for culling otherwise our test system dir fills up
-                self._delete_savedir(todel["filename"])
-
-        delete_oldest(undos, 1)
-        for game_id in {i["game_info"]["game_id"] for i in saves}:
-            delete_oldest([i for i in saves if i["game_info"]["game_id"] == game_id], self.max_saves)
-
-    """
     Given a save_info return a full pathname to that directory
     """
 
@@ -645,15 +623,17 @@ class Engine(CustomSaves):
         if not isinstance(filename, str) or not re.fullmatch(r"(?:save|undo)_\d+_\d+(?:_[a-f0-9]{8})?", filename):
             raise ValueError("无效的备份标识")
 
-    async def update_snapshot(self, filename, pinned, note=""):
+    async def update_snapshot(self, filename, pinned, note="", name=None):
         self._validate_filename(filename)
         if not isinstance(pinned, bool) or not isinstance(note, str) or len(note) > 500:
             raise ValueError("固定状态无效或备注超过 500 字")
+        if name is not None and (not isinstance(name, str) or len(name) > 100):
+            raise ValueError("存档名称无效或超过 100 字")
         si = self._file_to_saveinfo(filename + ".json")
-        if si["is_undo"]:
-            raise ValueError("撤销备份不能固定，请先创建普通备份")
         si["pinned"] = pinned
         si["note"] = note.strip()
+        if name is not None:
+            si["name"] = name.strip()
         write_json(self._saveinfo_to_dir(si) + ".json", si)
         return si
 
@@ -721,9 +701,7 @@ class Engine(CustomSaves):
     SaveInfo is a dict with filename, game_id, timestamp, is_undo
     game_info is a dict of game_id and install_root
     """
-    async def do_backup(self, game_info: dict, dry_run: bool = False, automatic: bool = False) -> dict:
-        if automatic and game_info["game_id"] not in self.get_enabled_games():
-            return None
+    async def do_backup(self, game_info: dict, dry_run: bool = False) -> dict:
         logger.info(f'正在尝试备份：{game_info}')
         custom_info = self._custom_plan(game_info)
         if custom_info is not None:
@@ -737,18 +715,7 @@ class Engine(CustomSaves):
         if not rcf:
             return None
 
-        game_id = game_info["game_id"]
-        newest_save = await self._get_newest_save(game_id)
         fingerprint = self._fingerprint(game_info) if custom_info is not None else None
-        if newest_save and self.ignore_unchanged and custom_info is not None:
-            if newest_save.get("fingerprint") == fingerprint:
-                return None
-        elif newest_save and self.ignore_unchanged and "custom_files" not in newest_save["game_info"]:
-            game_timestamp = self._get_rcf_timestamp(rcf, game_info)
-            if newest_save["timestamp"] > game_timestamp:
-                logger.warning(
-                    f'游戏 {game_id} 的存档没有变化，跳过备份')
-                return None
 
         if not dry_run:
             saveInfo = self._create_savedir(game_info)
@@ -756,7 +723,6 @@ class Engine(CustomSaves):
                 saveInfo["fingerprint"] = fingerprint
             self._copy_all_to_saveinfo(saveInfo, rcf)
 
-            await self._cull_old_saves()
             return saveInfo
         else:
             return {}  # For dryruns return a placeholder empty dict to indicate 'would have backed up'
@@ -810,9 +776,6 @@ class Engine(CustomSaves):
             for relative in save_info.get("remove_on_undo", {}).get(suffix, []):
                 if not self.dry_run:
                     safe_file(root, relative).unlink(missing_ok=True)
-
-        # we now might have too many undos, so possibly delete one
-        await self._cull_old_saves()
 
     """
     Given a list of game_infos, return a list of game_infos which are supported for backups

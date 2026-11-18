@@ -2,6 +2,7 @@ import logging
 import os
 import steamback
 import decky
+from steamback.browser import list_save_files
 
 logger = decky.logger
 
@@ -30,11 +31,8 @@ def get_engine() -> object:
 
 class Plugin:
 
-    async def get_enabled_games(self):
-        return get_engine().get_enabled_games()
-
-    async def set_game_enabled(self, game_id: int, enabled: bool):
-        return get_engine().set_game_enabled(game_id, enabled)
+    async def list_save_files(self, directory: str):
+        return list_save_files(directory)
 
     async def get_path_context(self):
         return {"home": os.path.expanduser("~"), "steam_root": get_engine().get_steam_root()}
@@ -48,8 +46,8 @@ class Plugin:
     async def set_custom_game(self, game_info: dict, paths: list):
         return get_engine().set_custom_game(game_info, paths)
 
-    async def update_snapshot(self, filename: str, pinned: bool, note: str = ""):
-        return await get_engine().update_snapshot(filename, pinned, note)
+    async def update_snapshot(self, filename: str, pinned: bool, note: str = "", name: str = None):
+        return await get_engine().update_snapshot(filename, pinned, note, name)
 
     async def set_account_id(self, id_num: int):
         # logger.info(f'Setting account id { id_num }')
@@ -63,8 +61,8 @@ class Plugin:
     SaveInfo is a dict with filename, game_id, timestamp, is_undo
     game_info is a dict of game_id and install_root
     """
-    async def do_backup(self, game_info: dict, dry_run: bool, automatic: bool = False) -> dict:
-        return await get_engine().do_backup(game_info, dry_run, automatic)
+    async def do_backup(self, game_info: dict, dry_run: bool) -> dict:
+        return await get_engine().do_backup(game_info, dry_run)
 
     """
     Restore a particular savegame using the saveinfo object

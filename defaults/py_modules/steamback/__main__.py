@@ -6,7 +6,7 @@ import os
 import platform
 import platformdirs
 import asyncio
-from . import Engine, Config, test, util
+from . import Engine, Config, test
 
 """The command line arguments"""
 args = None
@@ -14,12 +14,10 @@ args = None
 
 def main():
     """Perform command line steamback operations"""
-    parser = argparse.ArgumentParser(description="UmeYc 存档备份：仅自动备份已开启的游戏")
+    parser = argparse.ArgumentParser(description="UmeYc-SteamBack：手动备份和管理游戏存档")
     parser.add_argument("--debug", "-d", help="显示调试日志",
                         action="store_true")
     parser.add_argument("--test", "-t", help="运行上游集成测试（需要本机 Steam 存档）",
-                        action="store_true")
-    parser.add_argument("--daemon", "-D", help="后台监测已开启自动备份的游戏",
                         action="store_true")
     parser.add_argument("--steampath", "-s",
                         help="指定 Steam 目录，覆盖自动检测")
@@ -70,9 +68,6 @@ def main():
 
     if args.test:
         asyncio.run(test.testImpl(e))
-    elif args.daemon:
-        d = util.SteamWatcher(e)
-        asyncio.run(d.run_forever())
     else:
         from . import gui
         gui.run(e)
