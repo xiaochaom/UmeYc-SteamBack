@@ -8,8 +8,10 @@ import os
 import shutil
 import logging
 import traceback
-import glob
+import copy
+import uuid
 from pathlib import Path
+from .custom import CustomSaves, safe_file, write_json
 
 
 logger = None
@@ -31,10 +33,10 @@ def _parse_vcf(path: str) -> dict:
                 if m:
                     d[m.group(1)] = m.group(2)
     except FileNotFoundError:
-        logger.warning(f'App for { path } is not currently mounted, skipping')
+        logger.warning(f'游戏路径当前不可用，已跳过：{path}')
     except Exception:
         logger.error(
-            f'Failed parsing vcf { path } due to exception { traceback.format_exc() }')
+            f'解析 Steam 配置失败：{path}，{traceback.format_exc()}')
     return d
 
 
@@ -56,7 +58,7 @@ class Config(NamedTuple):
     steam_dir: str  # the root of the Steam data files
 
 
-class Engine:
+class Engine(CustomSaves):
     def __init__(self, config: Config):
         global logger
         logger = config.logger
@@ -69,7 +71,7 @@ class Engine:
         #    logger.info('Running under decky')
         # except:
 
-        logger.info(f'Steamback engine created: { config }')
+        logger.info(f'存档备份引擎已初始化：{config}')
 
         # a dict from gameid -> gameinfo for all installed games.  ONLY USED ON DESKTOP not DECKY
         self.all_games = None
@@ -81,7 +83,7 @@ class Engine:
         self.ignore_unchanged = True
 
     def add_account_id(self, id_num: int):
-        logger.debug(f'Setting account id { id_num } on { self }')
+        logger.debug(f'设置 Steam 账号：{id_num}')
         self.account_ids.add(id_num)
 
     """Find the steam account ID for the current user (and)
@@ -180,7 +182,7 @@ class Engine:
                                and f.endswith(".acf"), os.listdir(app_dir))
             except Exception as e:
                 logger.warning(
-                    f'Skipping invalid library directory { app_dir } due to { e }')
+                    f'跳过无效的游戏库目录：{app_dir}，{e}')
 
             for f in files:
                 vcf = _parse_vcf(os.path.join(app_dir, f))
@@ -233,7 +235,7 @@ class Engine:
         # we want the directories that contained the autocloud
         dirs = list(map(lambda f: str(f.parent), files))
 
-        logger.debug(f'Autoclouds in { root_dir } are { dirs }')
+        logger.debug(f'在 {root_dir} 中找到云存档目录：{dirs}')
         return dirs
 
     """
@@ -309,7 +311,7 @@ class Engine:
 
         addRoots(False)
 
-        logger.debug(f'Searching roots { roots }')
+        logger.debug(f'正在查找存档目录：{roots}')
         foundDirs = []
         for r in roots:
             if self._rcf_is_valid(r, rcf):
@@ -338,7 +340,7 @@ class Engine:
 
         # finding saves only work if we have already found the installdir for this game...
         if not self._parse_installdir(game_info):
-            logger.error(f"Invalid game_info, not installdir { game_info }")
+            logger.error(f"未找到游戏安装目录：{game_info}")
             return foundDirs
 
         # okay - now check the standard doc roots for games - do this before looking for autoclouds because it is more often the match
@@ -362,7 +364,7 @@ class Engine:
             r = self._find_save_root_from_autoclouds(game_info, rcf, f)
             if r:
                 logger.debug(
-                    f"Mapping autocloud { f } to { r } root directory")
+                    f"云存档目录映射：{f} → {r}")
                 autoRoots.append(r)
 
         # Add the autocloud dirs to the simple directories we found
@@ -381,7 +383,7 @@ class Engine:
         for f in rcf:
             full = os.path.join(root_dir, f)
             if os.path.isfile(full):
-                logger.debug(f'RCF is valid { root_dir }')
+                logger.debug(f'已确认云存档文件存在：{root_dir}')
                 return True
             else:
                 # logger.debug(f'RCF file not found { full }')
@@ -429,16 +431,16 @@ class Engine:
                         else:
                             prevl = s
             else:
-                logger.debug(f"No rcf {path}")
+                logger.debug(f"未找到云存档清单：{path}")
 
-        logger.debug(f'Read rcf with { len(rcf) } entries')
+        logger.debug(f'读取到 {len(rcf)} 个云存档文件')
 
         # If we haven't already found where the savegames for this app live, do so now (or fail if not findable)
         if "save_games_roots" not in game_info:
             saveRoots = self._find_save_games(game_info, rcf)
             if len(saveRoots) < 1:
                 logger.warning(
-                    f'Unable to backup { game_info }: not yet supported')
+                    f'无法识别游戏存档，请自行选择路径：{game_info}')
                 return None
 
             # remove save_game roots which don't seem to match any filenames in the existing rcf data from valve
@@ -448,7 +450,7 @@ class Engine:
                 filter(lambda root: self._rcf_is_valid(root, rcf), saveRoots))
             if len(saveRoots) < 1:
                 logger.warning(
-                    f'RCF seems invalid, not backing up { game_info }')
+                    f'云存档清单未匹配到文件，请自行选择路径：{game_info}')
                 return None
 
             # For legacy purposes, use the first found entry as save_games_root, we store this as a dict mapping
@@ -491,12 +493,12 @@ class Engine:
     def _copy_by_rcf(self, rcf: list, src_dir: str, dest_dir: str):
         numCopied = 0
         for k in rcf:
-            spath = os.path.join(src_dir, k)
+            spath = safe_file(src_dir, k)
 
             # if the filename contains directories - create them
             if os.path.exists(spath):
                 numCopied = numCopied + 1
-                dpath = os.path.join(dest_dir, k)
+                dpath = safe_file(dest_dir, k)
                 # logger.debug(f'Copying file { k }')
                 if not self.dry_run:
                     dir = os.path.dirname(dpath)
@@ -506,7 +508,7 @@ class Engine:
                 # logger.warning(f'Not copying missing file { k }')
                 pass
         logger.info(
-            f'Copied { numCopied } files from { src_dir } to { dest_dir }')
+            f'已复制 {numCopied} 个文件：{src_dir} → {dest_dir}')
 
     """
     Find the timestamp of the most recently updated file in a directory
@@ -544,20 +546,19 @@ class Engine:
         game_id = game_info["game_id"]
         # This better be populated by now!
         assert game_info["save_games_roots"]
-        ts = int(round(time.time() * 1000))  # msecs since 1970
+        latest = max((int(f.split("_")[2].split(".")[0])
+                      for f in os.listdir(self._get_savesdir())
+                      if re.fullmatch(r"(?:save|undo)_\d+_\d+(?:_[a-f0-9]{8})?\.json", f)), default=0)
+        ts = max(int(time.time() * 1000), latest + 1)
 
         si = {
-            "game_info": game_info,
+            "game_info": copy.deepcopy(game_info),
             "timestamp": ts,
-            "filename": f'{ "undo" if is_undo else "save" }_{ game_id }_{ ts }',
-            "is_undo": is_undo
+            "filename": f'{ "undo" if is_undo else "save" }_{ game_id }_{ ts }_{uuid.uuid4().hex[:8]}',
+            "is_undo": is_undo,
+            "pinned": False,
+            "note": "",
         }
-
-        path = self._saveinfo_to_dir(si)
-        logger.debug(f'Creating savedir JSON {path}, {si}')
-        if not self.dry_run:
-            with open(path + ".json", 'w') as fp:
-                json.dump(si, fp, indent=1)
 
         return si
 
@@ -567,7 +568,7 @@ class Engine:
 
     def _file_to_saveinfo(self, filename: str) -> dict:
         dir = self._get_savesdir()
-        with open(os.path.join(dir, filename)) as j:
+        with open(os.path.join(dir, filename), encoding="utf-8") as j:
             try:
                 si = json.load(j)
                 # logger.debug(f'Parsed filename {filename} as {si}')
@@ -575,39 +576,40 @@ class Engine:
                 # convert old pre version 2 files to have valid metadata
                 gi = si["game_info"]
                 if "save_games_roots" not in gi:
-                    logger.warning("Saveinfo is old format, upgrading...")
+                    logger.warning("正在兼容读取旧格式备份元数据…")
                     gi["save_games_roots"] = {gi["save_games_root"]: ""}
                     del gi["save_games_root"]
             except json.JSONDecodeError as e:
-                logger.error(
-                    f'Corrupted JSON for {filename}, attempting delete of bad json file, {e}')
-                try:
-                    os.remove(j)
-                except OSError:
-                    pass
-                raise  # still call this a failure for the parent to deal with.  The next time they scan the bogus JSON will be gone
+                logger.error(f'备份元数据损坏，已跳过但保留原文件：{filename}，{e}')
+                raise
+            si.setdefault("pinned", False)
+            si.setdefault("note", "")
             return si
 
     """ delete the savedir and associated json
     """
 
-    def _delete_savedir(self, filename):
+    def _delete_savedir(self, filename, allow_pinned=False):
         root = self._get_savesdir()
+        self._validate_filename(filename)
+        metadata = os.path.join(root, filename + ".json")
+        if not allow_pinned and os.path.isfile(metadata) and self._file_to_saveinfo(filename + ".json")["pinned"]:
+            raise ValueError("固定存档不能被自动删除")
 
         # Make sure saves dir is a valid absolute path before we start doing dangerous things
-        assert root[0] == '/'
+        assert os.path.isabs(root)
 
-        filepath = os.path.join(root, filename) + "*"
-        files = glob.glob(filepath)
+        self._validate_filename(filename)
+        files = sorted([os.path.join(root, f) for f in os.listdir(root)
+                 if f == filename or f == filename + ".json"
+                 or re.fullmatch(re.escape(filename) + r"_\d+", f)],
+                       key=lambda path: path.endswith(".json"))
         for f in files:
-            logger.debug(f'Deleting {f}')
-            try:
-                if os.path.isfile(f):
-                    os.remove(f)
-                elif os.path.isdir(f):
-                    shutil.rmtree(f, ignore_errors=True)
-            except OSError:
-                pass
+            logger.debug(f'正在删除备份文件：{f}')
+            if os.path.isfile(f) or os.path.islink(f):
+                os.remove(f)
+            elif os.path.isdir(f):
+                shutil.rmtree(f)
 
     """
     we keep only the most recent undo and the most recent 10 saves
@@ -615,18 +617,19 @@ class Engine:
     async def _cull_old_saves(self):
         infos = await self.get_saveinfos()
 
-        undos = list(filter(lambda i: i["is_undo"], infos))
-        saves = list(filter(lambda i: not i["is_undo"], infos))
+        undos = [i for i in infos if i["is_undo"] and not i["pinned"]]
+        saves = [i for i in infos if not i["is_undo"] and not i["pinned"]]
 
         def delete_oldest(files, to_keep):
             while len(files) > to_keep:
                 todel = files.pop()
-                logger.info(f'Culling { todel }')
+                logger.info(f'滚动清理旧备份：{todel}')
                 # if not self.dry_run: we ignore dryrun for culling otherwise our test system dir fills up
                 self._delete_savedir(todel["filename"])
 
         delete_oldest(undos, 1)
-        delete_oldest(saves, self.max_saves)
+        for game_id in {i["game_info"]["game_id"] for i in saves}:
+            delete_oldest([i for i in saves if i["game_info"]["game_id"] == game_id], self.max_saves)
 
     """
     Given a save_info return a full pathname to that directory
@@ -634,7 +637,31 @@ class Engine:
 
     def _saveinfo_to_dir(self, save_info: dict) -> str:
         d = self._get_savesdir()
+        self._validate_filename(save_info["filename"])
         return os.path.join(d, save_info["filename"])
+
+    @staticmethod
+    def _validate_filename(filename):
+        if not isinstance(filename, str) or not re.fullmatch(r"(?:save|undo)_\d+_\d+(?:_[a-f0-9]{8})?", filename):
+            raise ValueError("无效的备份标识")
+
+    async def update_snapshot(self, filename, pinned, note=""):
+        self._validate_filename(filename)
+        if not isinstance(pinned, bool) or not isinstance(note, str) or len(note) > 500:
+            raise ValueError("固定状态无效或备注超过 500 字")
+        si = self._file_to_saveinfo(filename + ".json")
+        if si["is_undo"]:
+            raise ValueError("撤销备份不能固定，请先创建普通备份")
+        si["pinned"] = pinned
+        si["note"] = note.strip()
+        write_json(self._saveinfo_to_dir(si) + ".json", si)
+        return si
+
+    async def delete_snapshot(self, filename):
+        self._validate_filename(filename)
+        self._file_to_saveinfo(filename + ".json")
+        self._delete_savedir(filename, allow_pinned=True)
+        return True
 
     """
     Get the newest saveinfo for a specified game (or None if not found)
@@ -656,10 +683,18 @@ class Engine:
             game_info = save_info["game_info"]
             dest_basename = self._saveinfo_to_dir(save_info)
             gameRoots = self._get_game_roots(game_info)
+            save_info["files"] = {}
             for src_dir, suffix in gameRoots.items():
                 dest_dir = dest_basename + suffix
                 # logger.debug(f'copying gamedir { src_dir } to { dest_dir }')
-                self._copy_by_rcf(rcf, src_dir, dest_dir)
+                files = game_info.get("custom_files", {}).get(suffix, rcf)
+                files = [f for f in files if safe_file(src_dir, f).is_file()]
+                save_info["files"][suffix] = files
+                self._copy_by_rcf(files, src_dir, dest_dir)
+            if not self.dry_run:
+                if "fingerprint" in save_info and self._fingerprint(game_info, dest_basename) != save_info["fingerprint"]:
+                    raise ValueError("存档在备份过程中发生变化，请退出游戏后重试")
+                write_json(dest_basename + ".json", save_info)
         except:
             # Don't keep old directory/json around if we encounter an exception
             self._delete_savedir(save_info["filename"])
@@ -676,7 +711,8 @@ class Engine:
         for dest_dir, suffix in gameRoots.items():
             src_dir = mirror_basename + suffix
             # logger.debug(f'copying backup dir { src_dir } to { dest_dir }')
-            self._copy_by_rcf(rcf, src_dir, dest_dir)
+            files = save_info.get("files", game_info.get("custom_files", {})).get(suffix, rcf)
+            self._copy_by_rcf(files, src_dir, dest_dir)
 
     """
     Backup a particular game.
@@ -685,24 +721,39 @@ class Engine:
     SaveInfo is a dict with filename, game_id, timestamp, is_undo
     game_info is a dict of game_id and install_root
     """
-    async def do_backup(self, game_info: dict, dry_run: bool = False) -> dict:
-        logger.info(f'Attempting backup of { game_info }')
-        rcf = self._read_rcf(game_info)
+    async def do_backup(self, game_info: dict, dry_run: bool = False, automatic: bool = False) -> dict:
+        if automatic and game_info["game_id"] not in self.get_enabled_games():
+            return None
+        logger.info(f'正在尝试备份：{game_info}')
+        custom_info = self._custom_plan(game_info)
+        if custom_info is not None:
+            game_info = custom_info
+            rcf = [f for files in game_info["custom_files"].values() for f in files]
+        else:
+            game_info = dict(game_info)
+            game_info.pop("save_games_roots", None)
+            rcf = self._read_rcf(game_info)
 
         if not rcf:
             return None
 
         game_id = game_info["game_id"]
         newest_save = await self._get_newest_save(game_id)
-        if newest_save and self.ignore_unchanged:
+        fingerprint = self._fingerprint(game_info) if custom_info is not None else None
+        if newest_save and self.ignore_unchanged and custom_info is not None:
+            if newest_save.get("fingerprint") == fingerprint:
+                return None
+        elif newest_save and self.ignore_unchanged and "custom_files" not in newest_save["game_info"]:
             game_timestamp = self._get_rcf_timestamp(rcf, game_info)
             if newest_save["timestamp"] > game_timestamp:
                 logger.warning(
-                    f'Skipping backup for { game_id } - no changed files')
+                    f'游戏 {game_id} 的存档没有变化，跳过备份')
                 return None
 
         if not dry_run:
             saveInfo = self._create_savedir(game_info)
+            if fingerprint is not None:
+                saveInfo["fingerprint"] = fingerprint
             self._copy_all_to_saveinfo(saveInfo, rcf)
 
             await self._cull_old_saves()
@@ -715,19 +766,50 @@ class Engine:
     """
     async def do_restore(self, save_info: dict):
         # logger.debug(f'In do_restore for { save_info }')
+        self._validate_filename(save_info["filename"])
+        # 客户端只提供标识，恢复路径和固定状态均以本机持久化元数据为准。
+        save_info = self._file_to_saveinfo(save_info["filename"] + ".json")
         game_info = save_info["game_info"]
-        rcf = self._read_rcf(game_info)
-        assert rcf
+        if "files" in save_info or "custom_files" in game_info:
+            rcf = [f for files in save_info.get("files", game_info.get("custom_files", {})).values() for f in files]
+        else:
+            rcf = self._read_rcf(game_info)
+        if not rcf and "files" not in save_info and "custom_files" not in game_info:
+            raise ValueError("找不到可恢复的存档文件")
+
+        # 恢复前完整校验，损坏的备份不能覆盖当前存档。
+        for root, suffix in game_info["save_games_roots"].items():
+            for relative in save_info.get("files", game_info.get("custom_files", {})).get(suffix, rcf):
+                source = safe_file(self._saveinfo_to_dir(save_info) + suffix, relative)
+                safe_file(root, relative)
+                if ("files" in save_info or "custom_files" in game_info) and not source.is_file():
+                    raise ValueError(f"备份文件缺失：{relative}")
 
         # first make the backup (unless restoring from an undo already)
         if not save_info["is_undo"]:
-            logger.info('Generating undo files')
-            undoInfo = self._create_savedir(game_info, is_undo=True)
+            logger.info('正在生成撤销备份')
+            undo_game = copy.deepcopy(game_info)
+            stored_files = save_info.get("files", game_info.get("custom_files"))
+            if stored_files is not None:
+                # 覆盖式恢复：同时保存目标文件当前状态和原备份清单。
+                undo_game["custom_files"] = {
+                    suffix: [f for f in files if safe_file(root, f).is_file()]
+                    for root, suffix in game_info["save_games_roots"].items()
+                    for files in [stored_files[suffix]]}
+            undoInfo = self._create_savedir(undo_game, is_undo=True)
+            if stored_files is not None:
+                undoInfo["remove_on_undo"] = {
+                    suffix: [f for f in files if f not in undo_game["custom_files"][suffix]]
+                    for suffix, files in stored_files.items()}
             self._copy_all_to_saveinfo(undoInfo, rcf)
 
         # then restore from our old snapshot
-        logger.info(f'Attempting restore of { save_info }')
+        logger.info(f'正在恢复存档：{save_info}')
         self._copy_all_from_saveinfo(save_info, rcf)
+        for root, suffix in game_info["save_games_roots"].items():
+            for relative in save_info.get("remove_on_undo", {}).get(suffix, []):
+                if not self.dry_run:
+                    safe_file(root, relative).unlink(missing_ok=True)
 
         # we now might have too many undos, so possibly delete one
         await self._cull_old_saves()
@@ -739,15 +821,18 @@ class Engine:
         # if we get any sort of exception while scanning a particular game info, keep trying the others
         def try_rcf(info):
             try:
+                custom = self._custom_plan(info)
+                if custom is not None:
+                    return any(custom["custom_files"].values())
                 # logger.debug(f'try_rcf { info }')
                 return self._read_rcf(info)
             except FileNotFoundError:
                 logger.warning(
-                    f'RCF file not found in scan of {info}, probably an unmounted SD card')
+                    f'找不到云存档清单，请检查磁盘挂载：{info}')
                 return None
             except Exception:
                 logger.error(
-                    f'Error scanning rcf for {info}, exception { traceback.format_exc() }')
+                    f'识别游戏存档失败：{info}，{traceback.format_exc()}')
                 return None
 
         # logger.debug(f'find supported { game_infos }')
@@ -764,7 +849,7 @@ class Engine:
                 return os.path.exists(f)
             except Exception:
                 logger.error(
-                    f'Error finding mount for {f}, exception { traceback.format_exc() }')
+                    f'检查磁盘路径失败：{f}，{traceback.format_exc()}')
                 return None
 
         mounted = list(filter(try_mount, dirs))
@@ -785,7 +870,7 @@ class Engine:
                 si = self._file_to_saveinfo(f)
                 return si
             except Exception as e:
-                logger.error(f'Error reading JSON for {f}, {e}')
+                logger.error(f'读取备份元数据失败：{f}，{e}')
                 return None
 
         infos = list(filter(lambda f: f is not None, map(

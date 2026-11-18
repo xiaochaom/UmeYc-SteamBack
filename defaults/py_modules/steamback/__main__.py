@@ -6,7 +6,7 @@ import os
 import platform
 import platformdirs
 import asyncio
-from . import Engine, Config, test, util, gui
+from . import Engine, Config, test, util
 
 """The command line arguments"""
 args = None
@@ -14,38 +14,30 @@ args = None
 
 def main():
     """Perform command line steamback operations"""
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--debug", "-d", help="Show debug log messages",
+    parser = argparse.ArgumentParser(description="UmeYc 存档备份：仅自动备份已开启的游戏")
+    parser.add_argument("--debug", "-d", help="显示调试日志",
                         action="store_true")
-    parser.add_argument("--test", "-t", help="Run integration code test",
+    parser.add_argument("--test", "-t", help="运行上游集成测试（需要本机 Steam 存档）",
                         action="store_true")
-    parser.add_argument("--daemon", "-D", help="Run as a daemon that just looks for games to backup",
+    parser.add_argument("--daemon", "-D", help="后台监测已开启自动备份的游戏",
                         action="store_true")
     parser.add_argument("--steampath", "-s",
-                        help="Ignores auto detection and force a specific Steam path")
+                        help="指定 Steam 目录，覆盖自动检测")
 
     global args
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.DEBUG if args.debug else logging.INFO)
     logger = logging.getLogger()
-    logger.info('Steamback running...')
+    logger.info('UmeYc 存档备份正在启动…')
 
     # FIXME - I bet the following will need tweaking for Windows
     plat_sys = platform.system()
     if plat_sys == "Windows":
-        # DEAR WINDOWS devs - if this isn't correct you can probably fix it by doing something like https://stackoverflow.com/questions/7468061/finding-installation-directory-of-a-program-on-windows-from-python
-        # please send in a pull-request if you can!
-        logger.warning("""HEY! KIND TESTER! No one has tried this tool before on Windows.
-                    If it works (or not) could you send an email to the author: kevinh@geeksville.com
-                    If it doesn't work and you know a little python you could probably contribute an easy fix - see our github!""")
+        logger.info("使用 Windows Steam 默认目录，可通过 --steampath 指定其他位置")
         steam_dir = os.path.join("c:/", "Program Files (x86)", "Steam")
     elif plat_sys == "Darwin":
-        # DEAR osx devs - if this isn't correct you can probably fix it
-        # please send in a pull-request if you can!
-        logger.warning("""HEY! KIND TESTER! No one has tried this tool before on the Mac.
-            If it works (or not) could you send an email to the author: kevinh@geeksville.com?
-            If it doesn't work and you know a little python you could probably contribute an easy fix - see our github!""")
+        logger.info("使用 macOS Steam 默认目录，可通过 --steampath 指定其他位置")
         steam_dir = os.path.join(os.path.expanduser(
             "~"), "Library", "Application Support", "Steam")
     else:
@@ -59,18 +51,17 @@ def main():
 
     if not os.path.exists(steam_dir):
         logger.error(
-            f'Can\'t find steam directory at { steam_dir }, exiting...')
+            f'找不到 Steam 目录：{steam_dir}，程序退出。')
         return
 
     app_name = "steamback"
     app_author = "geeksville"
     app_dir = platformdirs.user_data_dir(app_name, app_author)
-    logger.info(f'Storing application data in { app_dir }')
+    logger.info(f'备份与配置保存目录：{app_dir}')
 
     config = Config(logger, app_dir, steam_dir)
     e = Engine(config)
     e.auto_set_account_id()
-    e.max_saves = 50  # On desktop UIs we can show many more saves than 10
 
     all_games = e.find_all_game_info()
     # print(f'All installed games: ')
@@ -83,6 +74,7 @@ def main():
         d = util.SteamWatcher(e)
         asyncio.run(d.run_forever())
     else:
+        from . import gui
         gui.run(e)
 
 

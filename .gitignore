@@ -51,3 +51,8 @@ decky_plugin.py
 
 # python egg distribution files
 *.egg-info
+
+# 本地打包产物与虚拟环境
+artifacts/
+.venv/
+build/

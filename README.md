@@ -1,61 +1,90 @@
-# Steamback
+# UmeYc-SteamBack｜游戏存档备份
 
-![Steamback badge](https://img.shields.io/badge/dynamic/json?url=https://plugins.deckbrew.xyz/plugins&query=$[?(@.name%20==%20%27Steamback%27)].downloads&suffix=%20installs&label=Steamback&color=3ea6a3)
+基于 [geeksville/steamback](https://github.com/geeksville/steamback) 的中文改造版，支持 Steam Deck 的 Decky 插件和 Python 桌面界面。
 
-(This page is mostly about our Steam Deck plugin - if you are looking for the desktop version of Steamback see [here](doc/desktop.md))
+## 功能
 
-Steamback is a plugin for [decky-loader](https://deckbrew.xyz/).  It adds automatic 'snapshots' of changed savegames for many (but not all - see below) 'steam cloud' enabled games.  
+- **中文界面**：备份、恢复、配置、备注、删除和确认提示均使用中文。
+- **按游戏开启**：默认不自动备份任何游戏。游戏列表分为“已开启自动备份”和“未开启自动备份”，显示数量，可折叠；每款游戏有独立开关。
+- **自动识别 + 自行选择**：支持自动识别 Steam 云存档；识别不到或游戏不支持云存档时，可以选择存档文件夹、文件，或输入绝对路径。同一游戏可配置多个路径。
+- **非 Steam 游戏**：Decky 列表包含 Steam 的非 Steam 快捷方式；也可以手动填写快捷方式 ID 和名称。
+- **固定存档（Pin）**：固定备份永久排除在滚动清理之外，不占普通备份名额。
+- **备注与时间**：固定备份可添加或修改备注。列表显示完整的本地备份时间，修改备注不会改变原备份时间。
+- **手动删除**：普通、固定和撤销备份均可手动删除，操作前确认；不会删除游戏当前存档。
+- **恢复与撤销**：恢复前保存一份撤销备份，可以撤销最近一次恢复。
 
-These snapshots allow you to 'rewind' to previous save-game versions.  This is particularly useful if your game only offers one save-game and (like me) are a poor game player and you want to rewind to the version from yesterday or last week.
+## 如何使用
 
-If you see bugs, please file an [issue](https://github.com/geeksville/steamback/issues) at our github.
+1. 打开 Decky 中的 **Steamback**，界面标题为“UmeYc 存档备份”。
+2. 展开“未开启自动备份”，找到游戏。
+3. 如果显示“已识别云存档”，可以直接开启；如果未识别，点击“选择存档路径”，选择实际存档所在文件夹或文件后保存。选择器支持显示隐藏文件，Proton 存档路径也可以手动输入。
+4. 打开该游戏的自动备份开关。**保存自定义路径不会自动开启备份。**
+5. 已开启的游戏在启动、退出时检查存档，有变化才备份；也可以点击“立即备份”手动保存一次。关闭自动备份的游戏仍可手动备份。
+6. 在备份记录中选择“固定存档”或“固定并备注”。固定备份显示在独立的“固定存档”列表中。
+7. 恢复前退出游戏，然后选择对应时间的备份并确认。
 
-![Steamback settings](doc/screenshot.jpeg)
+### 滚动保留规则
 
-## How automatic snapshots work
+每款游戏保留最近 **10 个未固定的普通备份**，固定备份额外保留。例如：某游戏有 3 个固定备份和 10 个普通备份，再生成一个普通备份时，只删除最旧的普通备份，仍保留 3 + 10 个。
 
-Steamback waits for games to exit.  When a (supported) game exits it automatically makes a local 'snapshot' of the save-data for that game.  The plugin keeps the ten most recent snapshots available so you can 'rewind' to a particular version of a save-game.
+**解除固定不会立即删除存档**。解除固定的备份重新计入普通备份，在下一次成功生成备份或恢复后执行滚动清理时，按原备份时间决定是否超限删除。修改备注、开关游戏和刷新列表不会触发滚动清理。
 
-## How to rewind to a snapshot
+撤销备份单独保留最近一份，不占普通备份名额，不能固定或备注。
 
-![Steamback settings](doc/confirm.jpeg)
+### 自定义路径说明
 
-To rewind to a save-game:
+- 自动识别只适用于能找到 Steam 云存档清单的游戏；其他游戏需要用户选择实际存档位置，本项目不内置全游戏存档路径数据库。
+- 自定义路径优先于自动识别，按所选目录递归备份普通文件，或仅备份指定的单个文件。子目录符号链接不会被跟随。
+- 请只选择实际存档目录，避免选择整个游戏安装目录、Proton 前缀或主目录。不能选择备份数据目录及其父子目录。
+- 路径不存在、磁盘未挂载时不会生成空备份或清理旧备份。空文件夹等到游戏生成存档后才能备份。
+- 移除所有自定义路径并保存后恢复自动识别；已生成的备份保留原始恢复路径。
+- 恢复采用**覆盖备份中包含的文件**的方式，不删除后来新增的存档槽位或其他文件。撤销会还原本次覆盖的文件；本次恢复新建的文件会在撤销时移除。
+- 列表时间为**备份创建时间**，按设备本地时区显示。
 
-* Exit any running games (you can not rewind to an old save-game while that game is running)
-* Press ... button
-* Click the decky icon
-* Click on "Steamback"
-* Select which save-game you want to rewind to
-* Confirm you want to revert in the confirmation dialog
+## 安装 Decky 插件
 
-Steamback will then rewind to that save game.  Also (because this plugin is still in alpha) it will create a special "undo" snapshot.  You can use this undo to revert whatever changes were made by the most recent rewind.
+从本仓库的 GitHub Actions 构建产物下载 `UmeYc-SteamBack-1.2.0.zip`，解压后将其中的 `Steamback` 文件夹放到：
 
-## What games are supported?
+```text
+/home/deck/homebrew/plugins/Steamback
+```
 
-Not all games are supported. This plugin only supports games that use the steam 'cloud save' API.  
+然后重启 Decky。开发构建也可使用 Decky 的 ZIP 安装功能。
 
-The plugin will show what games you have installed that **are** supported.  Most (nearly all?) games marked as 'steam cloud' enabled are supported, but if you see one that isn't please file a github issue.
+插件内部名称保留 `Steamback`，以延续上游的配置与备份目录；不要同时安装上游版和本改造版。
 
-![Steamback settings](doc/supported.jpeg)
+## 数据保存
 
-## How to install Steamback
+Decky 使用 `DECKY_PLUGIN_RUNTIME_DIR`，桌面版继续使用上游 `steamback` 应用数据目录。主要文件如下：
 
-Steamback is available in the Decky loader plug-in 'store'.  You can search for it there and then click 'install'.
+| 文件 | 用途 |
+| --- | --- |
+| `enabled_games.json` | 已明确开启自动备份的游戏 ID；不存在时默认全关 |
+| `custom_games.json` | 用户选择的游戏存档路径 |
+| `saves2/*.json` | 备份元数据，包括时间、固定状态、备注、文件清单 |
+| `saves2/save_*` | 实际备份文件，多路径使用独立后缀目录 |
 
-## How to use Steamback
+兼容读取上游旧备份。升级后自动备份开关默认全部关闭，需要重新按游戏开启。插件升级前建议另行保留原备份目录。
 
-The plugin will automatically take snapshots **whenever you exit a supported game**.  So if you want a snapshot, make sure to exit the game completely.  Steamback will pop up a notification in the bottom right of your screen saying "Steamback snapshot taken".
+## 桌面版
 
-If you ever want to rewind to a particular snapshot, just click the ... button, go to decky/steamback and select which snapshot you want to rewind to.
+参见[桌面使用说明](doc/desktop.md)。Windows、macOS 和 Linux 的桌面环境需要 Python 3.11 及 Tk；Steam 游戏进程监测目前沿用上游的 Linux 实现，其他平台可使用手动备份。
 
-# Are you a developer (or would you like to learn)?
+## 开发与验证
 
-We love pull-requests but please see our [requirements](doc/development.md) so your changes can be merged.
+```bash
+npm ci
+npm run typecheck
+npm run build
+npm run test:frontend
+PYTHONPATH=defaults/py_modules python3.11 -m unittest discover -s tests -p 'test_*.py' -v
+python3.11 bin/package-plugin.py
+```
 
-# License & credits
+详见[开发说明](doc/development.md)。自动测试在临时目录中执行，不读取玩家的真实存档。
 
-Steamback is Copyright 2023 Geeksville Industries, LLC.  It is open-source (GPL v3 licensed) and we welcome collaboration on our github. 
+## 许可与致谢
 
-The application icon when running on desktop computers is [by Icons8](https://icons8.com/icon/J6Lv30IPIWZI/refresh) and used per their terms of use.
+上游 Steamback 版权所有 © 2023 Geeksville Industries, LLC。本项目保留上游历史，按 [GPL-3.0-or-later](LICENSE) 许可发布，改造维护：xiaochaom。
 
+上游桌面图标来自 [Icons8](https://icons8.com/icon/J6Lv30IPIWZI/refresh)。

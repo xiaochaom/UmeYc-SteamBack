@@ -1,15 +1,18 @@
 {
   "name": "steamback",
-  "version": "1.1.2",
-  "description": "Automatic savegame snapshots for Steam",
+  "version": "1.2.0",
+  "description": "中文 Steam 存档备份：按游戏开启、自选路径、固定与备注",
   "scripts": {
-    "build": "shx rm -rf dist && rollup -c",
+    "build": "npm run typecheck && rollup -c",
     "watch": "rollup -c -w",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "PYTHONPATH=defaults/py_modules python3.11 -m unittest discover -s tests -p \"test_*.py\" -v",
+    "typecheck": "tsc --noEmit",
+    "package": "npm run build && python3.11 bin/package-plugin.py",
+    "test:frontend": "node --test tests/test_frontend.mjs"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/geeksville/steamback.git"
+    "url": "git+https://github.com/xiaochaom/UmeYc-SteamBack.git"
   },
   "keywords": [
     "decky",
@@ -21,29 +24,23 @@
   "author": "Kevin Hester <kevinh@geeksville.com",
   "license": "GPL-3.0-or-later",
   "bugs": {
-    "url": "https://github.com/geeksville/steamback/issues"
+    "url": "https://github.com/xiaochaom/UmeYc-SteamBack/issues"
   },
-  "homepage": "https://github.com/geeksville/steamback#readme",
+  "homepage": "https://github.com/xiaochaom/UmeYc-SteamBack#readme",
   "devDependencies": {
-    "decky-frontend-lib": "^3.25.0",
-    "@rollup/plugin-commonjs": "^21.1.0",
-    "@rollup/plugin-json": "^4.1.0",
-    "@rollup/plugin-node-resolve": "^13.3.0",
-    "@rollup/plugin-replace": "^4.0.0",
-    "@rollup/plugin-typescript": "^8.3.3",
-    "@types/react": "16.14.0",
+    "@decky/rollup": "^1.0.2",
+    "@decky/ui": "^4.11.1",
+    "@types/react": "18.3.28",
     "@types/steamid": "^2.0.1",
-    "@types/webpack": "^5.28.0",
-    "rollup": "^2.77.1",
-    "rollup-plugin-import-assets": "^1.1.1",
-    "shx": "^0.3.4",
-    "tslib": "^2.4.0",
-    "typescript": "^4.7.4"
+    "rollup": "^4.57.1",
+    "typescript": "^5.9.3",
+    "@rollup/plugin-typescript": "^11.1.6"
   },
   "dependencies": {
-    "javascript-time-ago": "^2.5.9",
-    "react-icons": "^4.4.0",
-    "steamid": "^2.0.0"
+    "@decky/api": "^1.1.3",
+    "react-icons": "^5.5.0",
+    "steamid": "^2.0.0",
+    "tslib": "^2.8.1"
   },
   "pnpm": {
     "peerDependencyRules": {
@@ -52,5 +49,9 @@
         "react-dom"
       ]
     }
-  }
+  },
+  "contributors": [
+    "xiaochaom"
+  ],
+  "type": "module"
 }

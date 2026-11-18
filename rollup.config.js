@@ -1,38 +1,23 @@
-import commonjs from '@rollup/plugin-commonjs';
-import json from '@rollup/plugin-json';
-import { nodeResolve } from '@rollup/plugin-node-resolve';
-import replace from '@rollup/plugin-replace';
-import typescript from '@rollup/plugin-typescript';
-import { defineConfig } from 'rollup';
-import importAssets from 'rollup-plugin-import-assets';
+import deckyPlugin from "@decky/rollup";
+import typescript from "@rollup/plugin-typescript";
+import ts from "typescript";
 
-import { name } from "./plugin.json";
+const config = deckyPlugin();
 
-export default defineConfig({
-  input: './src/index.tsx',
-  plugins: [
-    commonjs(),
-    nodeResolve(),
-    typescript(),
-    json(),
-    replace({
-      preventAssignment: false,
-      'process.env.NODE_ENV': JSON.stringify('production'),
-    }),
-    importAssets({
-      publicPath: `http://127.0.0.1:1337/plugins/${name}/`
-    })
-  ],
-  context: 'window',
-  external: ['react', 'react-dom', "decky-frontend-lib"],
-  output: {
-    file: 'dist/index.js',
-    globals: {
-      react: 'SP_REACT',
-      'react-dom': 'SP_REACTDOM',
-      "decky-frontend-lib": "DFL"
+// 一次性构建无需文件监控，避免 TypeScript 的 macOS 监控句柄阻止退出。
+// rollup -w 仍使用官方默认监控方式。
+if (!process.env.ROLLUP_WATCH) {
+  const compiler = {
+    ...ts,
+    sys: {
+      ...ts.sys,
+      watchFile: () => ({ close() {} }),
+      watchDirectory: () => ({ close() {} }),
     },
-    format: 'iife',
-    exports: 'default',
-  },
-});
+  };
+  config.plugins = config.plugins.map(plugin =>
+    plugin.name === "typescript" ? typescript({ typescript: compiler }) : plugin
+  );
+}
+
+export default config;

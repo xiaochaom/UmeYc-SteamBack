@@ -11,15 +11,17 @@ from . import Engine
 
 def make_game_info(p: Engine, game_id: int) -> dict:
     # we try to use the version in the engine if possible - because it has fully validated info
-    info = p.all_games.get(game_id, None)
+    info = (p.all_games or {}).get(game_id, None)
+    if not info:
+        info = next((g for g in p.get_custom_games() if g["game_id"] == game_id), None)
 
     if not info:
-        print(f'Warning: no info found for { game_id } - simulating...')
+        print(f'未找到游戏 {game_id} 的信息，尝试使用默认 Steam 路径')
         info = {
             # On a real steamdeck there may be multiple install_roots (main vs sdcard etc) (but only one per game)
             "install_root": p.get_steam_root(),
             "game_id": game_id,
-            "game_name": None
+            "game_name": f"游戏 {game_id}"
         }
 
     return info
@@ -53,7 +55,7 @@ def find_running_games() -> list[int]:
             id = get_game_id(proc)
             if id:
                 r.append(id)
-        except psutil.AccessDenied:
+        except (psutil.AccessDenied, psutil.NoSuchProcess):
             pass  # Windows won't let us see some processes
     return r
 
@@ -85,8 +87,10 @@ class SteamWatcher:
 
         backups = []
         for game_id in stopped:
+            if game_id not in self.engine.get_enabled_games():
+                continue
             info = make_game_info(self.engine, game_id)
-            b = await self.engine.do_backup(info)
+            b = await self.engine.do_backup(info, automatic=True)
             if b is not None:
                 backups.append(b)
 
@@ -95,8 +99,8 @@ class SteamWatcher:
         return CheckResult(game_started=len(started) > 0, backed_up=backups)
 
     async def run_forever(self):
-        self.engine.logger.info(
-            "Watching Steam for game exit, press Ctrl-C to quit...")
+        self.engine.config.logger.info(
+            "正在监测已开启备份的游戏，按 Ctrl-C 退出…")
         while True:
             await asyncio.sleep(5)
             await self.check_once()

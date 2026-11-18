@@ -1,363 +1,268 @@
-#!python3
-
-
-from tkinter import *
-from tkinter import ttk
-import sv_ttk
-import datetime
-import timeago
-import os
-from async_tkinter_loop import async_handler
+"""中文桌面界面，与 Decky 插件共用备份、固定和滚动清理逻辑。"""
 import asyncio
-from . import Engine, util
+import datetime
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox, simpledialog
 
-logger = None
-
-
-def add_scrollbar(view: ttk.Treeview) -> ttk.Scrollbar:
-    root = view.master
-    b = ttk.Scrollbar(root,
-                      orient="vertical",
-                      command=view.yview)
-
-    # Configuring treeview
-    view.configure(yscrollcommand=b.set)
-
-    return b
+import sv_ttk
+from async_tkinter_loop import async_handler
+from . import util
 
 
-async def main_loop(root: Tk) -> None:
-    """
-    An asynchronous implementation of tkinter mainloop
-    :param root: tkinter root object
-    :return: nothing
-    """
-    try:
-        while True:
-            try:
-                root.winfo_exists()  # Will throw TclError if the main window is destroyed
-                root.update()
-            except TclError:
-                break
-
-            # Don't poll events quickly if not visible and not the focus of the user
-            # no longer checking root.state() == 'normal'
-            interval = 0.05 if root.focus_displayof() else 0.5
-            await asyncio.sleep(interval)
-    except TclError as e:
-        if not "application has been destroyed" in str(e):
-            print(f'Exiting due to { e }')
-
-
-def saveinfo_ago_str(si: dict) -> str:
-    # our timestamps are in msecs
-    now = datetime.datetime.now()
-    ts = datetime.datetime.fromtimestamp(si["timestamp"] / 1000.0)
-    ts_str = timeago.format(ts, now)
-    return ts_str
-
-
-status_watching_str = "Status: Watching Steam for game exit..."
+def saveinfo_ago_str(save):
+    return datetime.datetime.fromtimestamp(save["timestamp"] / 1000).strftime("%Y-%m-%d %H:%M:%S")
 
 
 class GUI:
-    def __init__(self, root: Tk, e: Engine):
+    def __init__(self, root, engine):
         self.root = root
-        self.engine = e
-        self.watcher = util.SteamWatcher(e)
+        self.engine = engine
+        self.watcher = util.SteamWatcher(engine)
+        self.saves = {}
+        self.games = {}
+        self.available = set()
+        root.title("UmeYc 存档备份")
+        root.geometry("1150x680")
+        root.minsize(900, 500)
+        self.status = ttk.Label(root, text="正在识别游戏存档…", wraplength=1000)
+        self.status.pack(side=tk.BOTTOM, fill=tk.X, padx=12, pady=8)
+        ttk.Label(root, text="自动备份默认关闭，请按游戏开启。每款游戏保留最近 10 个普通备份，固定存档不占名额。解除固定后，下次滚动清理时再处理。",
+                  wraplength=1000).pack(fill=tk.X, padx=12, pady=10)
+        panels = ttk.Panedwindow(root, orient=tk.HORIZONTAL)
+        panels.pack(fill=tk.BOTH, expand=True, padx=12)
+        left, right = ttk.Frame(panels), ttk.Frame(panels)
+        panels.add(left, weight=1)
+        panels.add(right, weight=2)
+        self.game_tree = self.tree(left, ("游戏", "自动备份", "识别状态"), (200, 85, 150))
+        self.save_tree = self.tree(right, ("游戏", "备份时间", "类型", "备注"), (180, 165, 90, 240))
+        for label, callback in [
+            ("开启 / 关闭自动备份", self.toggle_game),
+            ("选择存档路径", self.configure),
+            ("添加游戏（输入 ID）", self.add_game),
+            ("立即备份", async_handler(self.backup)),
+            ("刷新列表", async_handler(self.refresh)),
+        ]:
+            ttk.Button(left, text=label, command=callback).pack(fill=tk.X, pady=3)
+        for label, callback in [
+            ("恢复所选存档 / 撤销恢复", async_handler(self.restore)),
+            ("固定 / 解除固定", async_handler(self.toggle_pin)),
+            ("编辑备注并固定", async_handler(self.edit_note)),
+            ("删除所选备份", async_handler(self.delete)),
+        ]:
+            ttk.Button(right, text=label, command=callback).pack(fill=tk.X, pady=3)
 
-        # A dictionary mapping from saveinfo filename to saveinfo dictionary object
-        self.saves = None
+    def tree(self, parent, columns, widths):
+        frame = ttk.Frame(parent)
+        frame.pack(fill=tk.BOTH, expand=True)
+        tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse")
+        for name, width in zip(columns, widths):
+            tree.heading(name, text=name)
+            tree.column(name, width=width, minwidth=60)
+        bar = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=tree.yview)
+        tree.configure(yscrollcommand=bar.set)
+        bar.pack(side=tk.RIGHT, fill=tk.Y)
+        tree.pack(fill=tk.BOTH, expand=True)
+        return tree
 
-        # The saveinfo for the undo file
-        self.undo = None
+    def game(self):
+        selected = self.game_tree.selection()
+        if not selected:
+            messagebox.showinfo("选择游戏", "请先在左侧选择游戏。", parent=self.root)
+            return None
+        return self.games[int(selected[0])]
 
-        self.set_app_icon()
+    def save(self):
+        selected = self.save_tree.selection()
+        if not selected:
+            messagebox.showinfo("选择备份", "请先在右侧选择备份。", parent=self.root)
+            return None
+        return self.saves[selected[0]]
 
-        root.title("Steamback")
-        root.resizable(width=800, height=400)
+    def error(self, error):
+        self.status.config(text=f"操作失败：{error}")
+        messagebox.showerror("操作失败", str(error), parent=self.root)
 
-        """Save window position on exit"""
+    def toggle_game(self):
+        game = self.game()
+        if game:
+            try:
+                enabled = self.engine.get_enabled_games()
+                if game["game_id"] not in enabled and game["game_id"] not in self.available:
+                    messagebox.showinfo("选择存档", "尚未识别到存档，请先选择文件或文件夹。", parent=self.root)
+                    self.configure(game)
+                    return
+                self.engine.set_game_enabled(game["game_id"], game["game_id"] not in enabled)
+                asyncio.create_task(self.refresh())
+            except Exception as error:
+                self.error(error)
 
-        def on_close():
-            # Here I write the X Y position of the window to a file "myapp.conf"
-            with open(os.path.join(self.engine.config.app_data_dir, "window.conf"), "w") as conf:
-                conf.write(root.geometry())
+    def add_game(self):
+        game_id = simpledialog.askinteger("添加游戏", "输入 Steam 游戏或非 Steam 快捷方式 ID：", minvalue=1, parent=self.root)
+        if game_id is None:
+            return
+        name = simpledialog.askstring("游戏名称", "输入游戏名称：", parent=self.root)
+        if name:
+            self.configure({"game_id": game_id, "game_name": name, "install_root": self.engine.get_steam_root()})
 
-            root.destroy()
+    def configure(self, game=None):
+        game = game or self.game()
+        if not game:
+            return
+        paths = list(next((g["paths"] for g in self.engine.get_custom_games() if g["game_id"] == game["game_id"]), []))
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f'选择「{game["game_name"]}」存档')
+        dialog.geometry("760x420")
+        ttk.Label(dialog, text="可选择多个存档文件或文件夹。保存路径不会自动开启备份。\n移除全部路径后保存，可恢复云存档自动识别。").pack(padx=12, pady=12)
+        listing = tk.Listbox(dialog)
+        listing.pack(fill=tk.BOTH, expand=True, padx=12)
+        for path in paths:
+            listing.insert(tk.END, path)
 
-        root.protocol("WM_DELETE_WINDOW", on_close)
+        def add(folder):
+            chosen = (filedialog.askdirectory(title="选择存档文件夹", parent=dialog) if folder else
+                      filedialog.askopenfilename(title="选择存档文件", parent=dialog))
+            if chosen and chosen not in listing.get(0, tk.END):
+                listing.insert(tk.END, chosen)
 
-        # Here I read the X and Y positon of the window from when I last closed it.
+        def manual():
+            chosen = simpledialog.askstring("输入存档路径", "输入存档文件或文件夹的绝对路径：", parent=dialog)
+            if chosen:
+                listing.insert(tk.END, chosen)
+
+        def remove():
+            for index in reversed(listing.curselection()):
+                listing.delete(index)
+
+        def commit():
+            try:
+                self.engine.set_custom_game(game, list(listing.get(0, tk.END)))
+                dialog.destroy()
+                asyncio.create_task(self.refresh())
+            except Exception as error:
+                self.error(error)
+
+        buttons = ttk.Frame(dialog)
+        buttons.pack(fill=tk.X, padx=12, pady=12)
+        for text, callback in [("选择文件夹", lambda: add(True)), ("选择文件", lambda: add(False)),
+                               ("输入路径", manual), ("移除所选路径", remove), ("保存配置", commit), ("取消", dialog.destroy)]:
+            ttk.Button(buttons, text=text, command=callback).pack(side=tk.LEFT, padx=3)
+
+    async def backup(self):
+        game = self.game()
+        if game:
+            try:
+                saved = await self.engine.do_backup(game)
+                self.status.config(text="备份完成" if saved else "暂无变化或没有可备份的文件")
+                await self.refresh_saves()
+            except Exception as error:
+                self.error(error)
+
+    async def restore(self):
+        save = self.save()
+        if not save:
+            return
+        if save["game_info"]["game_id"] in util.find_running_games():
+            messagebox.showinfo("请先退出游戏", "游戏运行期间不能恢复存档。", parent=self.root)
+            return
+        if not messagebox.askyesno("恢复存档", f'将「{save["game_info"]["game_name"]}」恢复至 {saveinfo_ago_str(save)}？\n恢复前会生成可撤销备份。', parent=self.root):
+            return
         try:
-            with open(os.path.join(self.engine.config.app_data_dir, "window.conf"), "r") as conf:
-                root.geometry(conf.read())
-        except Exception:
-            pass  # Ignore any errors (file might be missing etc)
+            await self.engine.do_restore(save)
+            self.status.config(text="存档已恢复")
+            await self.refresh_saves()
+        except Exception as error:
+            self.error(error)
 
-        """ self.label_index = 0
-        self.label_text = StringVar()
-        self.label_text.set(self.LABEL_TEXT[self.label_index])
-        self.label = Label(root, textvariable=self.label_text)
-        self.label.bind("<Button-1>", self.cycle_label_text)
-        self.label.pack() """
+    async def toggle_pin(self):
+        save = self.save()
+        if save and not save["is_undo"]:
+            try:
+                await self.engine.update_snapshot(save["filename"], not save["pinned"], save["note"])
+                await self.refresh_saves()
+            except Exception as error:
+                self.error(error)
 
-        # self.greet_button = ttk.Button(root, text="Greet", command=self.greet)
-        # self.greet_button.pack()
+    async def edit_note(self):
+        save = self.save()
+        if save and not save["is_undo"]:
+            note = simpledialog.askstring("固定存档备注", "输入备注（最多 500 字）：", initialvalue=save["note"], parent=self.root)
+            if note is not None:
+                try:
+                    await self.engine.update_snapshot(save["filename"], True, note)
+                    await self.refresh_saves()
+                except Exception as error:
+                    self.error(error)
 
-        # self.close_button = ttk.Button(root, text="Close", command=root.quit)
-        # self.close_button.pack()
+    async def delete(self):
+        save = self.save()
+        if save and messagebox.askyesno("删除备份", f'确定删除「{save["game_info"]["game_name"]}」在 {saveinfo_ago_str(save)} 的{"固定" if save["pinned"] else ""}备份吗？\n此操作无法撤销，游戏当前存档不受影响。', parent=self.root):
+            try:
+                await self.engine.delete_snapshot(save["filename"])
+                await self.refresh_saves()
+            except Exception as error:
+                self.error(error)
 
-        self.undo_button = ttk.Button(
-            root, text="Undo changes to XXX", command=async_handler(self.on_undo_click))
-        self.revert_button = ttk.Button(
-            root, text="Revert XXX to save from 5 minutes ago", command=async_handler(self.on_revert_click))
+    async def refresh_saves(self):
+        selected = self.save_tree.selection()
+        saves = await self.engine.get_saveinfos()
+        saves.sort(key=lambda s: (not s["pinned"], -s["timestamp"]))
+        self.saves = {s["filename"]: s for s in saves}
+        self.save_tree.delete(*self.save_tree.get_children())
+        for save in saves:
+            self.save_tree.insert("", tk.END, iid=save["filename"], values=(
+                save["game_info"]["game_name"], saveinfo_ago_str(save),
+                "固定存档" if save["pinned"] else "撤销备份" if save["is_undo"] else "滚动备份", save["note"]))
+        if selected and selected[0] in self.saves:
+            self.save_tree.selection_set(selected)
 
-        # Define a label for the list.
-        self.status = ttk.Label(
-            root, text=status_watching_str)
-
-        # List supported games
-        treev = ttk.Treeview(root,
-                             selectmode='browse'
-                             # bg="grey",
-                             # activestyle='dotbox'
-                             )
-        self.supported_games = treev
-
-        s_sb = add_scrollbar(treev)
-
-        # Defining number of columns
-        treev["columns"] = ("name",)
-
-        # Defining heading
-        treev['show'] = 'headings'
-        treev.heading("name", text="Supported Games")
-
-        # List supported games
-        treev = ttk.Treeview(root,
-                             selectmode='none'
-                             # bg="grey",
-                             # activestyle='dotbox'
-                             )
-        self.supported_games = treev
-
-        games_sb = add_scrollbar(treev)
-
-        # Defining number of columns
-        treev["columns"] = ("name",)
-
-        # Defining heading
-        treev['show'] = 'headings'
-        treev.heading("name", text="Supported Games")
-
-        char_width = 8
-        treev.column("name", minwidth=char_width * 10,
-                     width=char_width * 30, stretch=YES)
-
-        # List save games
-        treev = ttk.Treeview(root,
-                             selectmode='browse'
-                             # bg="grey",
-                             # activestyle='dotbox'
-                             )
-        self.save_games = treev
-
-        saves_sb = add_scrollbar(treev)
-
-        # Defining number of columns
-        treev["columns"] = ("name", "time")
-
-        # Defining heading
-        treev['show'] = 'headings'
-        treev.heading("name", text="Save games")
-        treev.heading("time", text="Time")
-
-        treev.column("name", minwidth=char_width * 10,
-                     width=char_width * 30, stretch=YES)
-        treev.column("time", minwidth=char_width * 6,
-                     width=char_width * 17, stretch=NO)
-
-        treev.bind("<<TreeviewSelect>>", self.on_savegame_selected)
-
-        # Do the layout per this great documentation: https://tkdocs.com/tutorial/grid.html
-
-        self.supported_games.grid(
-            row=0, column=0, sticky=(N, S, W, E), rowspan=3)
-        games_sb.grid(row=0, column=1, sticky=(N, S), rowspan=3)
-
-        self.save_games.grid(row=0, column=3, sticky=(N, S, E, W), rowspan=1)
-        saves_sb.grid(row=0, column=4, sticky=(N, S), rowspan=1)
-
-        # Position the various undo/revert buttons but hide them for now
-        self.undo_button.grid(row=1, column=3, padx=8, pady=8)
-        self.revert_button.grid(row=2, column=3, padx=8, pady=8)
-        self.undo_button.grid_remove()
-        self.revert_button.grid_remove()
-
-        self.status.grid(row=10, column=0, sticky=(
-            W, E), padx=8, pady=8, columnspan=4)
-
-        root.rowconfigure(0, weight=1)
-
-        # grow the currently empty middle space
-        root.columnconfigure(0, weight=1)
-        root.columnconfigure(2, weight=1)
-        root.columnconfigure(3, weight=1)
-
-    """A savegame was selected in the treeview"""
-
-    def on_savegame_selected(self, event):
-        for filename in self.save_games.selection():
-            si = self.saves[filename]
-
-            # set revert button text
-            self.revert_button.config(
-                text=f'Revert { si["game_info"]["game_name"]} to save from { saveinfo_ago_str(si)}')
-
-            self.revert_button.grid()  # show revert button
-
-    """user clicked to restore from a savegame"""
-
-    async def on_revert_click(self):
-        for filename in self.save_games.selection():
-
-            # do the restore
-            si = self.saves[filename]
-            # self.engine.dry_run = True  # FIXME - testing
-            await self.engine.do_restore(si)
-
-            # Set status msg
-            new_text = f'Reverted to { si["game_info"]["game_name"] } snapshot'
-            self.set_status(new_text)
-
-            # deselect the item the user just reverted
-            self.save_games.selection_remove(filename)
-            self.revert_button.grid_remove()
-
-            # We just generated an undo save, so update the list of savegames
-            await self.find_savegames()
-
-    """User wants to undo our last revert"""
-
-    async def on_undo_click(self):
-        # do the restore
-        si = self.undo
-        assert si
-
-        # self.engine.dry_run = True  # FIXME - testing
-        await self.engine.do_restore(si)
-
-        # Set status msg
-        new_text = f'Undid changes to { si["game_info"]["game_name"] }'
-        self.set_status(new_text)
-
-    async def find_supported(self):
-        all_games = self.engine.find_all_game_info()
-
-        supported = await self.engine.find_supported(all_games)
-        tree = self.supported_games
-        # put all children into the args of this function call
-        tree.delete(*tree.get_children())
-        for g in supported:
-            tree.insert(
-                "", END, values=(g["game_name"], ))
-
-    async def find_savegames(self):
-        all_saves = await self.engine.get_saveinfos()
-
-        # Don't list any undos in the tree view
-        saveinfos = list(filter(lambda i: not i["is_undo"], all_saves))
-        undos = list(filter(lambda i: i["is_undo"], all_saves))
-
-        self.saves = {si["filename"]: si for si in saveinfos}
-
-        # show undo button as needed
-        if len(undos) > 0:
-            g = undos[0]
-            self.undo = g
-            self.undo_button.config(
-                text=f'Undo changes to { g["game_info"]["game_name"]}')
-            self.undo_button.grid()
-
-        # fill the treeview
-        # put all children into the args of this function call
-        tree = self.save_games
-        tree.delete(*tree.get_children())
-        for g in saveinfos:
-            # print(f'  {g}')
-            tree.insert(
-                "", END, iid=g["filename"], values=(g["game_info"]["game_name"], saveinfo_ago_str(g)))
-
-    """Look for steam changes, and then queue up looking again"""
-    async def watch_steam(self):
-        # self.engine.ignore_unchanged = False  # for testing
-        result = await self.watcher.check_once()
-        backups = result.backed_up
-
-        if result.game_started:
-            self.set_status(status_watching_str)
-
-        if (len(backups) > 0):
-            si = backups[0]  # only print for first one (the common case)
-            new_text = f'Save-game snapshot taken for { si["game_info"]["game_name"] }...'
-            await self.find_savegames()
-            self.set_status(new_text)
-
-        # Our run is exiting, but queue one for the future
-        quitting = False
-        if not quitting:
-            await asyncio.sleep(5)
-            asyncio.create_task(self.watch_steam())
-
-    def set_status(self, new_text):
-        self.status.config(text=new_text)
-
-    async def async_main_loop(self):
-        # do this in the background - update gui when done
-        asyncio.create_task(self.find_supported())
-        asyncio.create_task(self.find_savegames())
-        asyncio.create_task(self.watch_steam())
-
-        await main_loop(self.root)
-
-    """Set the icon for our app in GUI"""
-
-    def set_app_icon(self):
-        # might be missing on some systems so use a try catch and do the imports here
+    async def refresh(self):
         try:
-            from PIL import Image, ImageTk
-            with Image.open(os.path.join(os.path.dirname(
-                    __file__),  'data', 'icons8-refresh-96.png')) as ico:
-                photo = ImageTk.PhotoImage(ico)
-                self.root.wm_iconphoto(True, photo)
-        except Exception as e:
-            logger.warning(
-                f'Can\'t set application icon due to missing library: {e}')
+            selected = self.game_tree.selection()
+            games = {g["game_id"]: g for g in self.engine.find_all_game_info()}
+            games.update({g["game_id"]: g for g in self.engine.get_custom_games()})
+            self.games = games
+            self.engine.all_games = games
+            supported = await self.engine.find_supported(list(games.values()))
+            self.available = {g["game_id"] for g in supported}
+            enabled = self.engine.get_enabled_games()
+            self.game_tree.delete(*self.game_tree.get_children())
+            for game in sorted(games.values(), key=lambda g: g["game_name"]):
+                self.game_tree.insert("", tk.END, iid=str(game["game_id"]), values=(
+                    game["game_name"], "已开启" if game["game_id"] in enabled else "已关闭",
+                    "已识别" if game["game_id"] in self.available else "请自行选择存档"))
+            if selected and int(selected[0]) in games:
+                self.game_tree.selection_set(selected)
+            await self.refresh_saves()
+            self.status.config(text="正在监测已开启备份的游戏…")
+        except Exception as error:
+            self.error(error)
+
+    async def run(self):
+        await self.refresh()
+        async def watch():
+            while True:
+                await asyncio.sleep(5)
+                try:
+                    result = await self.watcher.check_once()
+                    if result.backed_up:
+                        await self.refresh_saves()
+                        self.status.config(text="游戏已退出，自动备份完成")
+                except Exception as error:
+                    self.status.config(text=f"自动备份失败：{error}")
+        task = asyncio.create_task(watch())
+        try:
+            while self.root.winfo_exists():
+                self.root.update()
+                await asyncio.sleep(0.05)
+        except tk.TclError:
+            pass
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
 
-"""
-    def cycle_label_text(self, event):
-        self.label_index += 1
-        self.label_index %= len(self.LABEL_TEXT)  # wrap around
-        self.label_text.set(self.LABEL_TEXT[self.label_index])
-"""
-
-
-def run(e: Engine):
-    global logger
-    logger = e.config.logger
-
-    root = Tk()
-
-    # to make tk less ugly https://www.reddit.com/r/Python/comments/lps11c/how_to_make_tkinter_look_modern_how_to_use_themes/
-    # style = Style(root)
-    # Set the theme with the theme_use method
-    # style.theme_use('clam')  # put the theme name here, that you want to use
+def run(engine):
+    root = tk.Tk()
     sv_ttk.set_theme("dark")
-
-    g = GUI(root, e)
-    # async_mainloop(root)
-
-    asyncio.get_event_loop_policy().get_event_loop(
-    ).run_until_complete(g.async_main_loop())
+    gui = GUI(root, engine)
+    asyncio.run(gui.run())

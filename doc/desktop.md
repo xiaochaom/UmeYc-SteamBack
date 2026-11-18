@@ -1,41 +1,36 @@
-# Desktop version of Steamback
+# 桌面版使用说明
 
-Steamback originally started as a Decky plugin for Steam Decks.  But a number of folks on reddit asked if it could also work on desktop.
+桌面版与 Decky 插件共用备份引擎，提供中文界面、逐游戏开关、自选存档路径、固定、备注、时间和手动删除。
 
-![Steamback desktop](desktop-screenshot.png)
+## 安装与启动
 
-## Supported platforms
+需要 Python 3.11 或以上版本及系统 Tk 支持。请从本仓库安装；PyPI 上的 `steamback` 是上游版本，不包含本项目的改造。
 
-This is a version Steamback that will hopefully work on Linux, Windows and OS-X.  However the developers have (thus-far) only tested on Linux.  If you try it on Windows or OS-X please send us a note and let us know how it goes.
-
-### Linux
-
-This tool should work on all modern linux distributions.  If you see a problem please let us know.
-
-### Windows
-
-If you know python and run Windows, please try this tool and possibly send in a pull-request for what is likely a fairly easy fix.
-
-If you are a developer and find it doesn't work on Windows or OS-X it is probably pretty easy to fix.  We'd love to work with you on a pull-request - please contact us.
-
-## Installing
-
-Steamback is written in python and you should be able to install (or upgrade) it by using the standard "pip" python tool with the following command:
-
-```
-pip3 install --upgrade steamback
+```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install .
+steamback
 ```
 
-## Using
+Windows 激活命令为 `.venv\Scripts\activate`。Linux 如缺少 Tk，请通过发行版安装 `python3-tk` 或与 Python 版本对应的 Tk 包。
 
-Run "steamback" to launch the app (currently we don't install platform app icons).
+如果 Steam 安装在其他位置：
 
-You should launch Steamback any time you are playing Steam games.  It will watch for game exit and take a save-game snapshot (if it can - it is subject to the same limits as the Steam Deck version of the tool).
+```bash
+steamback --steampath /你的/Steam/目录
+```
 
-On the left side of the window you'll see which games installed on your computer that are supported for automatic save-game snapshots.
+`steamback --help` 显示中文参数说明。`steamback --daemon` 在后台监测已开启的游戏，不显示界面；开关和路径可以先在界面中配置。
 
-If you need to revert to a particular snapshot click on it and then choose "Revert".
+## 操作
 
-# Are you a developer (or would you like to learn)?
+左侧选择游戏，可以开关自动备份、选择多个存档文件或目录，也可以立即备份。自动识别不到时先选择路径，再开启备份；所有游戏默认关闭。
 
-We love pull-requests but please see our [requirements](development.md) so your changes can be merged.
+右侧显示备份名称、完整本地时间、是否固定及备注。选中后可以恢复、固定或解除固定、编辑备注和删除。固定备份不占每款游戏 10 个普通备份的名额，解除固定后在下一次滚动清理时才处理。
+
+恢复采用文件覆盖，保留备份中没有的其他文件。恢复前自动保存一份撤销备份。恢复和删除均需要确认。
+
+## 平台限制
+
+本项目自动回归覆盖文件引擎，Steam 游戏进程监测沿用上游 Linux 实现。Windows 和 macOS 的自动退出监测尚未实现完整适配，可手动备份和恢复。桌面图形界面需要在有显示环境的系统中运行。

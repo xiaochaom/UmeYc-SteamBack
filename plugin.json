@@ -1,13 +1,14 @@
 {
   "name": "Steamback",
-  "author": "geeksville",
+  "author": "xiaochaom / geeksville",
   "flags": [],
   "publish": {
     "tags": [
       "steamback",
       "backup"
     ],
-    "description": "Automatic save game snapshot/restore for Steam",
+    "description": "中文存档备份：按游戏开启，支持自选存档、固定、备注和手动删除",
     "image": "https://raw.githubusercontent.com/geeksville/steamback/main/assets/screenshot.png"
-  }
+  },
+  "api_version": 1
 }
