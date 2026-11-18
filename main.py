@@ -16,6 +16,11 @@ def get_engine() -> object:
     global pinstance
     if not pinstance:
         app_data_dir = os.environ["DECKY_PLUGIN_RUNTIME_DIR"]
+        # Decky changes the runtime directory with the plugin name. Reuse the
+        # existing directory on upgrades so saves and configuration stay intact.
+        legacy_data_dir = os.path.join(os.path.dirname(app_data_dir), "Steamback")
+        if os.path.basename(app_data_dir) == "UmeYc-SteamBack" and os.path.isdir(legacy_data_dir):
+            app_data_dir = legacy_data_dir
         steam_dir = os.path.join(os.path.expanduser(
             "~"), ".local", "share", "Steam")
         config = steamback.Config(logger, app_data_dir, steam_dir)
@@ -89,8 +94,8 @@ class Plugin:
 
     # Asyncio-compatible long-running code, executed in a task when the plugin is loaded
     async def _main(self):
-        logger.info("UmeYc 存档备份已启动")
+        logger.info("UmeYc-SteamBack已启动")
 
     # Function called first during the unload process, utilize this to handle your plugin being removed
     async def _unload(self):
-        logger.info("UmeYc 存档备份已退出")
+        logger.info("UmeYc-SteamBack已退出")

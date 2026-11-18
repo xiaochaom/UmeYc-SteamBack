@@ -1,7 +1,7 @@
 import {
   ButtonItem, PanelSection, PanelSectionRow,
   quickAccessMenuClasses, showModal, ConfirmModal, Navigation,
-  Router, ModalRoot, DialogButton, TextField, Dropdown, ToggleField
+  Router, ModalRoot, DialogButton, TextField, Dropdown, ToggleField, Focusable
 } from "@decky/ui"
 import { FC, useState, useEffect } from "react"
 import { call, definePlugin, toaster, openFilePicker, FileSelectionType } from "@decky/api"
@@ -13,6 +13,7 @@ interface GameInfo {
   game_name: string
   install_root: string
   paths?: string[]
+  save_games_roots?: Record<string, string>
 }
 interface SaveInfo {
   game_info: GameInfo
@@ -25,7 +26,7 @@ interface SaveInfo {
 let steamRoot = ""
 let userHome = "/home/deck"
 let accountReady: Promise<unknown>
-const title = "UmeYc 存档备份"
+const title = "UmeYc-SteamBack"
 const dateText = (timestamp: number) => new Date(timestamp).toLocaleString("zh-CN", {
   year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit",
   minute: "2-digit", second: "2-digit", hour12: false
@@ -158,6 +159,8 @@ const EditNote: FC<{ save: SaveInfo, onSaved: () => Promise<void>, closeModal?: 
 }
 
 const Content: FC = () => {
+  const [selectedGameId, setSelectedGameId] = useState<number | null>(null)
+  const [selectedFilename, setSelectedFilename] = useState("")
   const [enabledCollapsed, setEnabledCollapsed] = useState(false)
   const [availableCollapsed, setAvailableCollapsed] = useState(true)
   const [saves, setSaves] = useState<SaveInfo[]>([])
@@ -173,12 +176,13 @@ const Content: FC = () => {
     await accountReady
     const [installed, configured, enabledIds] = await Promise.all([installedGames(), rpc<GameInfo[]>("get_custom_games"), rpc<number[]>("get_enabled_games")])
     setEnabled(enabledIds)
-    const all = [...new Map([...installed, ...configured].map(g => [g.game_id, g])).values()]
+    const currentSaves = await rpc<SaveInfo[]>("get_saveinfos")
+    setSaves(currentSaves)
+    const all = [...new Map([...currentSaves.map(s => s.game_info), ...installed, ...configured].map(g => [g.game_id, g])).values()]
       .sort((a, b) => a.game_name.localeCompare(b.game_name, "zh-CN"))
     setGames(all)
     setCustom(configured)
     setSupported(await rpc<GameInfo[]>("find_supported", { game_infos: all }))
-    await refreshSaves()
     setError("")
   }
   async function action(work: () => Promise<unknown>) {
@@ -211,60 +215,99 @@ const Content: FC = () => {
   }
   function snapshot(si: SaveInfo) {
     return <PanelSectionRow key={si.filename}>
-      <ButtonItem label={`${si.pinned ? "📌 " : ""}${si.game_info.game_name}`}
+      <ButtonItem layout="below" label={`${si.pinned ? "📌 " : ""}${si.game_info.game_name}`}
         description={<span style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
           {`${si.is_undo ? "撤销备份" : si.pinned ? "已固定 · 不参与滚动清理" : "滚动备份"}\n备份时间：${dateText(si.timestamp)}${si.note ? `\n备注：${si.note}` : ""}`}
         </span>} disabled={busy || Router.RunningApps.some(a => Number(a.appid) === si.game_info.game_id)}
         onClick={() => restore(si)}>{si.is_undo ? "撤销恢复" : "恢复"}</ButtonItem>
       {!si.is_undo && <div>
-        <ButtonItem disabled={busy} onClick={() => action(() => rpc("update_snapshot", {
+        <ButtonItem layout="below" disabled={busy} onClick={() => action(() => rpc("update_snapshot", {
           filename: si.filename, pinned: !si.pinned, note: si.note || ""
         }))}>{si.pinned ? "解除固定" : "固定存档"}</ButtonItem>
-        <ButtonItem disabled={busy} onClick={() => showModal(<EditNote save={si} onSaved={refreshSaves} />)}>
+        <ButtonItem layout="below" disabled={busy} onClick={() => showModal(<EditNote save={si} onSaved={refreshSaves} />)}>
           {si.pinned ? "编辑备注" : "固定并备注"}</ButtonItem>
       </div>}
-      <ButtonItem disabled={busy} onClick={() => remove(si)}>删除备份</ButtonItem>
+      <ButtonItem layout="below" disabled={busy} onClick={() => remove(si)}>删除备份</ButtonItem>
     </PanelSectionRow>
   }
+  function pathText(game: GameInfo) {
+    const configured = custom.find(g => g.game_id === game.game_id)
+    const detected = supported.find(g => g.game_id === game.game_id)
+    const paths = configured?.paths || Object.keys(detected?.save_games_roots || {})
+    return paths.length ? `${configured ? "自选存档路径" : "自动识别的存档路径"}：\n${paths.join("\n")}` : "未找到存档路径，请自行选择"
+  }
+  function autoToggle(game: GameInfo) {
+    const isEnabled = enabled.includes(game.game_id)
+    const isCustom = custom.some(g => g.game_id === game.game_id)
+    const available = supported.some(g => g.game_id === game.game_id)
+    return <ToggleField label={game.game_name} checked={isEnabled}
+      description={`${isEnabled ? "已开启" : "已关闭"} · ${isCustom ? available ? "自定义存档路径" : "路径暂不可用或暂无存档" : available ? "已识别云存档" : "未识别存档，请自行选择"}`}
+      disabled={busy || (!available && !isEnabled)}
+      onChange={value => action(async () => setEnabled(await rpc<number[]>("set_game_enabled", {
+        game_id: game.game_id, enabled: value
+      })))} />
+  }
+  const pathStyle = { whiteSpace: "pre-wrap" as const, overflowWrap: "anywhere" as const, margin: "8px 0", fontSize: 12, opacity: 0.75 }
   function gameGroup(isEnabled: boolean) {
     const group = games.filter(g => enabled.includes(g.game_id) === isEnabled)
     const collapsed = isEnabled ? enabledCollapsed : availableCollapsed
     return <PanelSection title={`${isEnabled ? "已开启自动备份" : "未开启自动备份"}（${group.length}）`}>
-      <PanelSectionRow><ButtonItem onClick={() => isEnabled ? setEnabledCollapsed(!collapsed) : setAvailableCollapsed(!collapsed)}>
+      <PanelSectionRow><ButtonItem layout="below" onClick={() => isEnabled ? setEnabledCollapsed(!collapsed) : setAvailableCollapsed(!collapsed)}>
         {collapsed ? "展开游戏列表 ▾" : "收起游戏列表 ▴"}
       </ButtonItem></PanelSectionRow>
       {!collapsed && group.map(game => {
-        const isCustom = custom.some(g => g.game_id === game.game_id)
-        const available = supported.some(g => g.game_id === game.game_id)
         return <PanelSectionRow key={game.game_id}>
-          <ToggleField label={game.game_name} checked={isEnabled}
-            description={`${isEnabled ? "已开启" : "已关闭"} · ${isCustom ? available ? "自定义存档路径" : "路径暂不可用或暂无存档" : available ? "已识别云存档" : "未识别存档，请自行选择"}`}
-            disabled={busy || (!available && !isEnabled)}
-            onChange={value => action(async () => setEnabled(await rpc<number[]>("set_game_enabled", {
-              game_id: game.game_id, enabled: value
-            })))} />
-          <ButtonItem disabled={busy} onClick={() => configure(game)}>选择存档路径</ButtonItem>
-          {available && <ButtonItem disabled={busy} onClick={() => action(() => backup(game))}>立即备份</ButtonItem>}
+          {autoToggle(game)}
+          <p style={pathStyle}>{pathText(game)}</p>
+          <ButtonItem layout="below" disabled={busy} onClick={() => configure(game)}>选择存档路径</ButtonItem>
+          <ButtonItem layout="below" disabled={busy} onClick={() => {
+            setSelectedGameId(game.game_id)
+            setSelectedFilename("")
+          }}>管理存档</ButtonItem>
         </PanelSectionRow>
       })}
       {!collapsed && group.length === 0 && <p style={{ padding: "0 16px" }}>{isEnabled ? "暂无开启自动备份的游戏" : "没有其他可选择的游戏"}</p>}
     </PanelSection>
   }
+  const selectedGame = games.find(g => g.game_id === selectedGameId)
+  if (selectedGame) {
+    const gameSaves = saves.filter(s => s.game_info.game_id === selectedGame.game_id)
+    const selectedSave = gameSaves.find(s => s.filename === selectedFilename) || gameSaves[0]
+    const available = supported.some(g => g.game_id === selectedGame.game_id)
+    return <div>
+      <PanelSection title={selectedGame.game_name}>
+        <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={() => setSelectedGameId(null)}>返回游戏列表</ButtonItem></PanelSectionRow>
+        <PanelSectionRow>
+          <Focusable flow-children="row" style={{ display: "flex", gap: 8 }}>
+            <DialogButton disabled={busy} style={{ flex: 1, width: 0, minWidth: 0 }} onClick={() => configure(selectedGame)}>选择路径</DialogButton>
+            <DialogButton disabled={busy} style={{ flex: 1, width: 0, minWidth: 0 }} onClick={() => action(refresh)}>刷新</DialogButton>
+          </Focusable>
+          <div style={pathStyle}>{pathText(selectedGame)}</div>
+        </PanelSectionRow>
+        <PanelSectionRow>{autoToggle(selectedGame)}</PanelSectionRow>
+        <PanelSectionRow><ButtonItem layout="below" disabled={busy || !available} onClick={() => action(() => backup(selectedGame))}>立即备份</ButtonItem></PanelSectionRow>
+      </PanelSection>
+      <PanelSection title={`选择并管理存档（${gameSaves.length}）`}>
+        {selectedSave ? <>
+          <PanelSectionRow><Dropdown menuLabel="选择备份记录" strDefaultLabel="选择备份记录" selectedOption={selectedSave.filename}
+            rgOptions={gameSaves.map(s => ({ data: s.filename,
+              label: `${s.is_undo ? "撤销备份" : s.pinned ? "📌 固定" : "普通"} · ${dateText(s.timestamp)}${s.note ? ` · ${s.note}` : ""}` }))}
+            onChange={option => setSelectedFilename(option.data)} /></PanelSectionRow>
+          {snapshot(selectedSave)}
+        </> : <p style={{ padding: "0 16px" }}>暂无备份。选择存档路径后，点击“立即备份”保存第一份。</p>}
+      </PanelSection>
+      <p style={{ padding: "0 16px", fontSize: 12, opacity: 0.7 }}>保留最近 10 个普通备份，固定存档额外保留。解除固定后，在下次滚动清理时参与清理。</p>
+    </div>
+  }
   return <div>
     <p style={{ padding: "0 16px" }}>默认关闭自动备份，请在下方按游戏开启。已开启的游戏在启动与退出时自动备份。每款游戏保留最近 10 个普通备份，固定存档额外保留。解除固定后，在下次滚动清理时参与清理。</p>
     {error && <p style={{ padding: "0 16px", color: "#ffaaaa" }}>加载失败：{error}</p>}
     <PanelSection title="备份设置">
-      <PanelSectionRow><ButtonItem disabled={loading || busy} onClick={() => configure()}>选择游戏与存档路径</ButtonItem></PanelSectionRow>
-      <PanelSectionRow><ButtonItem disabled={busy} onClick={() => action(refresh)}>刷新列表</ButtonItem></PanelSectionRow>
+      <PanelSectionRow><ButtonItem layout="below" disabled={loading || busy} onClick={() => configure()}>选择游戏与存档路径</ButtonItem></PanelSectionRow>
+      <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={() => action(refresh)}>刷新列表</ButtonItem></PanelSectionRow>
     </PanelSection>
     {loading ? <p style={{ padding: "0 16px" }}>正在识别游戏存档…</p> : <div>{gameGroup(true)}{gameGroup(false)}</div>}
-    <PanelSection title="固定存档">{saves.filter(s => s.pinned).map(snapshot)}
-      {!saves.some(s => s.pinned) && <p style={{ padding: "0 16px" }}>暂无固定存档</p>}
-    </PanelSection>
-    <PanelSection title="备份记录">{saves.filter(s => !s.pinned).map(snapshot)}
-      {!saves.some(s => !s.pinned) && <p style={{ padding: "0 16px" }}>暂无备份</p>}
-    </PanelSection>
-    <PanelSectionRow><ButtonItem onClick={() => {
+    <PanelSectionRow><ButtonItem layout="below" onClick={() => {
       Navigation.CloseSideMenus()
       Navigation.NavigateToExternalWeb("https://github.com/xiaochaom/UmeYc-SteamBack#readme")
     }}>使用说明</ButtonItem></PanelSectionRow>
@@ -292,7 +335,7 @@ export default definePlugin(() => {
     } catch (e) { report(e) }
   })
   return {
-    name: "Steamback",
+    name: "UmeYc-SteamBack",
     titleView: <div className={quickAccessMenuClasses.Title}>{title}</div>,
     content: <Content />,
     icon: <FiDownload />,

@@ -17,5 +17,5 @@ with ZipFile(output, "w", ZIP_DEFLATED) as archive:
         relative = path.relative_to(root).as_posix()
         if relative.startswith("defaults/py_modules/"):
             relative = relative.removeprefix("defaults/")
-        archive.write(path, "Steamback/" + relative)
+        archive.write(path, "UmeYc-SteamBack/" + relative)
 print(output)

@@ -7,13 +7,13 @@ import vm from 'node:vm';
 const bundle = readFileSync(new URL('../dist/index.js', import.meta.url), 'utf8')
   .replace('export { index as default };', 'globalThis.loadPlugin = index;');
 
-async function harness() {
+async function harness(options = {}) {
   let enabled = [];
   let modal;
   let listener;
   const calls = [];
   const running = [];
-  let saves = [{ filename: 'save_42_1770000000000', timestamp: 1770000000000,
+  let saves = options.saves || [{ filename: 'save_42_1770000000000', timestamp: 1770000000000,
     game_info: { game_id: 42, game_name: '测试游戏', install_root: '/Steam' },
     pinned: false, note: '', is_undo: false }];
   const effects = [];
@@ -43,10 +43,10 @@ async function harness() {
         case 'get_path_context': return { home: '/home/deck', steam_root: '/Steam' };
         case 'set_account_id': return null;
         case 'find_mounted': return ['/Steam'];
-        case 'get_custom_games': return [];
+        case 'get_custom_games': return options.custom || [];
         case 'get_enabled_games': return [...enabled];
         case 'set_game_enabled': enabled = args[1] ? [args[0]] : []; return [...enabled];
-        case 'find_supported': return [args[0][0]];
+        case 'find_supported': return [{ ...args[0][0], save_games_roots: { '/Steam/userdata/123/42/remote': '', '/home/deck/游戏存档': '_1' } }];
         case 'get_saveinfos': return saves.map(s => ({ ...s }));
         case 'do_backup': return saves[0];
         case 'update_snapshot': saves[0] = { ...saves[0], pinned: args[1], note: args[2] }; return saves[0];
@@ -73,6 +73,7 @@ async function harness() {
   });
   vm.runInContext(bundle, context);
   const plugin = context.loadPlugin();
+  assert.equal(plugin.name, 'UmeYc-SteamBack');
   function render(element = plugin.content) {
     current = components.get(element.type) || { values: [], mounted: false };
     components.set(element.type, current);
@@ -90,7 +91,11 @@ async function harness() {
   render();
   effects.splice(0).forEach(effect => effect());
   await new Promise(resolve => setImmediate(resolve));
-  return { render, find, nodes, calls, listener, running, modal: () => modal,
+  function manage() {
+    find(render(), 'ButtonItem', p => p.children.includes('展开游戏列表 ▾')).props.onClick();
+    find(render(), 'ButtonItem', p => p.children.includes('管理存档')).props.onClick();
+  }
+  return { render, find, nodes, calls, listener, running, manage, modal: () => modal,
     button: (tree, label) => find(tree, 'ButtonItem', p => p.children.includes(label)) };
 }
 
@@ -103,6 +108,9 @@ test('默认全关，显示分组数量，展开后可见开关和非 Steam 游�
   tree = h.render();
   assert.equal(h.find(tree, 'ToggleField', p => p.label === '测试游戏').props.checked, false);
   assert.equal(h.find(tree, 'ToggleField', p => p.label === '非 Steam 游戏').props.disabled, true);
+  const text = h.nodes(tree).flatMap(n => n.props?.children || []).filter(c => typeof c === 'string');
+  assert.ok(text.includes('自动识别的存档路径：\n/Steam/userdata/123/42/remote\n/home/deck/游戏存档'));
+  assert.ok(text.includes('未找到存档路径，请自行选择'));
   await h.find(tree, 'ToggleField', p => p.label === '测试游戏').props.onChange(true);
   tree = h.render();
   assert.ok(h.find(tree, 'PanelSection', p => p.title === '已开启自动备份（1）'));
@@ -124,6 +132,7 @@ test('生命周期事件仅为已开启的游戏发起自动备份', async () =>
 
 test('固定与解除固定只更新元数据，删除固定备份先确认', async () => {
   const h = await harness();
+  h.manage();
   await h.button(h.render(), '固定存档').props.onClick();
   let tree = h.render();
   assert.ok(h.button(tree, '解除固定'));
@@ -140,10 +149,29 @@ test('固定与解除固定只更新元数据，删除固定备份先确认', as
 
 test('运行中的游戏禁用恢复，并在确认操作时再次检查', async () => {
   const h = await harness();
+  h.manage();
   const before = h.button(h.render(), '恢复');
   before.props.onClick();
   h.running.push({ appid: '42' });
   assert.equal(h.button(h.render(), '恢复').props.disabled, true);
   await h.modal().props.onOK();
   assert.equal(h.calls.filter(c => c.method === 'do_restore').length, 0);
+});
+
+test('管理页依次显示选择路径、完整路径和备份选择，自动与自选路径可区分', async () => {
+  for (const custom of [[], [{ game_id: 42, game_name: '测试游戏', install_root: '/Steam', paths: ['/home/deck/自选槽位.sav', '/run/media/存档'] }]]) {
+    const h = await harness({ custom });
+    h.manage();
+    const tree = h.render();
+    const nodes = h.nodes(tree);
+    const choose = nodes.findIndex(n => n.type === 'DialogButton' && n.props.children.includes('选择路径'));
+    const path = nodes.findIndex(n => n.type === 'div' && n.props.children.some(c => typeof c === 'string' && c.includes('存档路径：')));
+    const selector = nodes.findIndex(n => n.type === 'Dropdown' && n.props.menuLabel === '选择备份记录');
+    assert.ok(choose >= 0 && path > choose && selector > path);
+    const text = nodes[path].props.children.join('');
+    assert.equal(text, custom.length ? '自选存档路径：\n/home/deck/自选槽位.sav\n/run/media/存档' : '自动识别的存档路径：\n/Steam/userdata/123/42/remote\n/home/deck/游戏存档');
+    assert.ok(h.button(tree, '恢复'));
+    h.button(tree, '返回游戏列表').props.onClick();
+    assert.ok(h.find(h.render(), 'PanelSection', p => p.title === '未开启自动备份（2）'));
+  }
 });

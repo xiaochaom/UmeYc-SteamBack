@@ -15,12 +15,12 @@
 
 ## 如何使用
 
-1. 打开 Decky 中的 **Steamback**，界面标题为“UmeYc 存档备份”。
+1. 打开 Decky 中的 **UmeYc-SteamBack**。
 2. 展开“未开启自动备份”，找到游戏。
-3. 如果显示“已识别云存档”，可以直接开启；如果未识别，点击“选择存档路径”，选择实际存档所在文件夹或文件后保存。选择器支持显示隐藏文件，Proton 存档路径也可以手动输入。
+3. 每款游戏的“选择存档路径”按钮上方会显示当前使用的完整路径，并注明是自动识别还是自选路径。未找到时会明确提示；点击按钮选择实际存档所在文件夹或文件后保存。选择器支持显示隐藏文件，Proton 存档路径也可以手动输入。
 4. 打开该游戏的自动备份开关。**保存自定义路径不会自动开启备份。**
 5. 已开启的游戏在启动、退出时检查存档，有变化才备份；也可以点击“立即备份”手动保存一次。关闭自动备份的游戏仍可手动备份。
-6. 在备份记录中选择“固定存档”或“固定并备注”。固定备份显示在独立的“固定存档”列表中。
+6. 点击该游戏的“管理存档”。页面上方为“选择路径 / 刷新”，下方显示完整存档路径；再往下可选择备份记录，进行恢复、固定、备注或删除。固定状态、备注和完整时间会显示在记录及选择列表中。
 7. 恢复前退出游戏，然后选择对应时间的备份并确认。
 
 ### 滚动保留规则
@@ -43,15 +43,15 @@
 
 ## 安装 Decky 插件
 
-从 [GitHub Releases](https://github.com/xiaochaom/UmeYc-SteamBack/releases/latest) 下载 `UmeYc-SteamBack-1.2.0.zip`，可使用 Decky 的 ZIP 安装功能；发布页同时提供 `SHA256SUMS.txt` 校验文件。也可以解压后将其中的 `Steamback` 文件夹放到：
+从 [GitHub Releases](https://github.com/xiaochaom/UmeYc-SteamBack/releases/latest) 下载 `UmeYc-SteamBack-1.2.1.zip`，可使用 Decky 的 ZIP 安装功能；发布页同时提供 `SHA256SUMS.txt` 校验文件。也可以解压后将其中的 `UmeYc-SteamBack` 文件夹放到：
 
 ```text
-/home/deck/homebrew/plugins/Steamback
+/home/deck/homebrew/plugins/UmeYc-SteamBack
 ```
 
 手动放置文件后重启 Decky。开发构建可从 GitHub Actions 获取。
 
-插件内部名称保留 `Steamback`，以延续上游的配置与备份目录；不要同时安装上游版和本改造版。
+从 1.2.0 或上游版升级时，先卸载旧的 `Steamback` 插件，再安装新版，避免重复加载。请保留原有数据目录 `/home/deck/homebrew/data/Steamback`，新版检测到该目录时会继续使用其中的备份与配置；全新安装使用 `/home/deck/homebrew/data/UmeYc-SteamBack`。
 
 ## 数据保存
 

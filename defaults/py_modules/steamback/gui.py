@@ -21,7 +21,7 @@ class GUI:
         self.saves = {}
         self.games = {}
         self.available = set()
-        root.title("UmeYc 存档备份")
+        root.title("UmeYc-SteamBack")
         root.geometry("1150x680")
         root.minsize(900, 500)
         self.status = ttk.Label(root, text="正在识别游戏存档…", wraplength=1000)
