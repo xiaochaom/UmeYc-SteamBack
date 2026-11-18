@@ -43,7 +43,7 @@
 
 ## 安装 Decky 插件
 
-从 [GitHub Releases](https://github.com/xiaochaom/UmeYc-SteamBack/releases/latest) 下载 `UmeYc-SteamBack-1.2.1.zip`，可使用 Decky 的 ZIP 安装功能；发布页同时提供 `SHA256SUMS.txt` 校验文件。也可以解压后将其中的 `UmeYc-SteamBack` 文件夹放到：
+从 [GitHub Releases](https://github.com/xiaochaom/UmeYc-SteamBack/releases/latest) 下载 `UmeYc-SteamBack-1.2.2.zip`，可使用 Decky 的 ZIP 安装功能；发布页同时提供 `SHA256SUMS.txt` 校验文件。也可以解压后将其中的 `UmeYc-SteamBack` 文件夹放到：
 
 ```text
 /home/deck/homebrew/plugins/UmeYc-SteamBack

@@ -26,6 +26,10 @@ interface SaveInfo {
 let steamRoot = ""
 let userHome = "/home/deck"
 let accountReady: Promise<unknown>
+// Steam hides and remounts the QAM when opening dropdowns and modal dialogs.
+// Keep the current management location for the lifetime of this plugin load.
+let managementGameId: number | null = null
+let managementFilename = ""
 const title = "UmeYc-SteamBack"
 const dateText = (timestamp: number) => new Date(timestamp).toLocaleString("zh-CN", {
   year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit",
@@ -159,8 +163,16 @@ const EditNote: FC<{ save: SaveInfo, onSaved: () => Promise<void>, closeModal?: 
 }
 
 const Content: FC = () => {
-  const [selectedGameId, setSelectedGameId] = useState<number | null>(null)
-  const [selectedFilename, setSelectedFilename] = useState("")
+  const [selectedGameId, setSelectedGameState] = useState<number | null>(managementGameId)
+  const [selectedFilename, setSelectedFilenameState] = useState(managementFilename)
+  function setSelectedGameId(value: number | null) {
+    managementGameId = value
+    setSelectedGameState(value)
+  }
+  function setSelectedFilename(value: string) {
+    managementFilename = value
+    setSelectedFilenameState(value)
+  }
   const [enabledCollapsed, setEnabledCollapsed] = useState(false)
   const [availableCollapsed, setAvailableCollapsed] = useState(true)
   const [saves, setSaves] = useState<SaveInfo[]>([])
@@ -269,6 +281,7 @@ const Content: FC = () => {
       {!collapsed && group.length === 0 && <p style={{ padding: "0 16px" }}>{isEnabled ? "暂无开启自动备份的游戏" : "没有其他可选择的游戏"}</p>}
     </PanelSection>
   }
+  if (selectedGameId !== null && loading && games.length === 0) return <p style={{ padding: "0 16px" }}>正在读取存档…</p>
   const selectedGame = games.find(g => g.game_id === selectedGameId)
   if (selectedGame) {
     const gameSaves = saves.filter(s => s.game_info.game_id === selectedGame.game_id)

@@ -95,7 +95,13 @@ async function harness(options = {}) {
     find(render(), 'ButtonItem', p => p.children.includes('展开游戏列表 ▾')).props.onClick();
     find(render(), 'ButtonItem', p => p.children.includes('管理存档')).props.onClick();
   }
-  return { render, find, nodes, calls, listener, running, manage, modal: () => modal,
+  async function remount() {
+    components.clear();
+    render();
+    effects.splice(0).forEach(effect => effect());
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  return { render, find, nodes, calls, listener, running, manage, remount, modal: () => modal,
     button: (tree, label) => find(tree, 'ButtonItem', p => p.children.includes(label)) };
 }
 
@@ -174,4 +180,20 @@ test('管理页依次显示选择路径、完整路径和备份选择，自动�
     h.button(tree, '返回游戏列表').props.onClick();
     assert.ok(h.find(h.render(), 'PanelSection', p => p.title === '未开启自动备份（2）'));
   }
+});
+
+test('Steam 浮层重建面板后保留管理中的游戏和所选备份', async () => {
+  const saves = [1, 2].map(i => ({ filename: `save_42_${1770000000000 + i}`, timestamp: 1770000000000 + i,
+    game_info: { game_id: 42, game_name: '测试游戏', install_root: '/Steam' }, pinned: false, note: '', is_undo: false }));
+  const h = await harness({ saves });
+  h.manage();
+  const selector = h.find(h.render(), 'Dropdown', p => p.menuLabel === '选择备份记录');
+  selector.props.onChange({ data: saves[1].filename });
+  await h.remount();
+  const tree = h.render();
+  assert.ok(h.button(tree, '返回游戏列表'));
+  assert.equal(h.find(tree, 'Dropdown', p => p.menuLabel === '选择备份记录').props.selectedOption, saves[1].filename);
+  h.button(tree, '恢复').props.onClick();
+  await h.modal().props.onOK();
+  assert.equal(h.calls.find(c => c.method === 'do_restore').args[0].filename, saves[1].filename);
 });
