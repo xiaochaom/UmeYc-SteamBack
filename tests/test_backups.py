@@ -54,6 +54,38 @@ class Backups(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(first["filename"], second["filename"])
         self.assertEqual(len(await self.engine.get_saveinfos()), 2)
 
+    async def test_detected_aliases_share_one_backup_without_rewriting_old_mappings(self):
+        self.engine.set_custom_game(self.game, [])
+        alias = self.root / "Windows 兼容目录"
+        alias.symlink_to(self.source, target_is_directory=True)
+        other = self.root / "另一个存档目录"
+        other.mkdir()
+        (other / self.file.name).write_text("第二处存档", encoding="utf-8")
+        cache = self.root / "cloud-cache"
+        cache.mkdir()
+        (cache / "remotecache.vdf").write_text(
+            f'"42"\n{{\n"{self.file.name}"\n{{\n"size" "9"\n}}\n}}\n', encoding="utf-8")
+        old_game = dict(self.game, save_games_roots={str(alias): "", str(self.source): "_1"})
+        old_roots = dict(old_game["save_games_roots"])
+        with patch.object(self.engine, "_get_gamedir", return_value=[str(cache)]), \
+                patch.object(self.engine, "_parse_installdir", return_value=True), \
+                patch.object(self.engine, "_search_likely_locations", return_value=[str(alias), str(self.source), str(other)]), \
+                patch.object(self.engine, "_find_autoclouds", return_value=[]):
+            supported = await self.engine.find_supported([old_game])
+            roots = supported[0]["save_games_roots"]
+            self.assertEqual(roots, {str(self.source.resolve()): "", str(other.resolve()): "_1"})
+            self.assertEqual(old_game["save_games_roots"], old_roots)
+            save = await self.engine.do_backup(old_game)
+            self.assertEqual(save["game_info"]["save_games_roots"], roots)
+            # One backup copy per real source; different sources remain separate.
+            base = self.data / "saves2" / save["filename"]
+            self.assertEqual((base / self.file.name).read_text(encoding="utf-8"), "第一章")
+            self.assertEqual((Path(str(base) + "_1") / self.file.name).read_text(encoding="utf-8"), "第二处存档")
+            self.assertFalse(Path(str(base) + "_2").exists())
+            self.file.write_text("修改后", encoding="utf-8")
+            await self.engine.do_restore(save)
+            self.assertEqual(self.file.read_text(encoding="utf-8"), "第一章")
+
     async def test_noncloud_multi_directory_and_same_parent_files(self):
         second = self.root / "另一个目录"
         second.mkdir()

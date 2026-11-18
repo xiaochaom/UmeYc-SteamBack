@@ -7,7 +7,6 @@ import { FC, ReactNode, useState, useEffect } from "react"
 import { call, definePlugin, routerHook } from "@decky/api"
 import { FiDownload } from "react-icons/fi"
 import SteamID from "steamid"
-import { LeftPanel } from "./components/left-panel"
 import { PanelDialog } from "./components/panel-dialog"
 import { SavePaths, PathDraft } from "./components/save-paths"
 
@@ -29,6 +28,7 @@ interface SaveInfo {
 }
 let steamRoot = ""
 let userHome = "/home/deck"
+let backupRoot = ""
 let accountReady: Promise<unknown>
 // Steam hides and remounts the QAM when opening dropdowns and modal dialogs.
 // Keep the current management location for the lifetime of this plugin load.
@@ -113,13 +113,17 @@ const SnapshotDetails: FC<{
   const [name, setName] = useState(save.name || "")
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
-  return <ModalRoot closeModal={closeModal} onCancel={closeModal}>
-    <Focusable flow-children="column" style={{ display: "flex", flexDirection: "column", gap: 12, minWidth: 0, width: "100%", maxHeight: "80vh", overflowY: "auto" }}>
-    <h2 style={{ margin: 0 }}>存档详情</h2>
-    <p>{save.game_info.game_name} · {dateText(save.timestamp)}</p>
-    <p>{save.is_undo ? "撤销备份" : "手动备份"}</p>
+  return <ModalRoot closeModal={closeModal} onCancel={closeModal} bCloseAfterOK={false}>
+    <Focusable aria-label="存档详情内容" flow-children="column" onSubmit={event => { event.preventDefault(); event.stopPropagation() }}
+      style={{ display: "flex", flexDirection: "column", gap: 8, minWidth: 0, width: "100%", maxHeight: "calc(100vh - 96px)", overflowY: "auto" }}>
+      <h2 style={{ margin: 0, fontSize: 20, lineHeight: "24px" }}>存档详情</h2>
+      <div style={{ fontSize: 13, lineHeight: "18px", overflowWrap: "anywhere" }}>
+        <div>{save.game_info.game_name}</div>
+        <div style={{ opacity: 0.75 }}>{dateText(save.timestamp)} · {save.is_undo ? "撤销备份" : "手动备份"}</div>
+      </div>
       <TextField label="存档名称（最多 100 字）" value={name} onChange={e => setName(e.target.value)} />
-      {error && <p role="alert">{error}</p>}
+      <p style={{ margin: 0, fontSize: 12, lineHeight: "18px", opacity: 0.75 }}>删除存档只删除备份，不会删除游戏当前存档。</p>
+      {error && <p role="alert" style={{ margin: 0, fontSize: 12 }}>{error}</p>}
       <Focusable flow-children="row" style={{ display: "flex", gap: 12, flexShrink: 0 }}>
         <DialogButton style={{ flex: "1 1 0", width: 0, minWidth: 0 }} disabled={busy || Router.RunningApps.some(a => Number(a.appid) === save.game_info.game_id)} onClick={onRestore}>
           {save.is_undo ? "撤销恢复" : "恢复存档"}
@@ -147,7 +151,11 @@ const Content: FC<{ side?: boolean }> = ({ side = false }) => {
   const [draft, setDraftState] = useState<PathDraft | null>(pathDraft)
   function setDraft(value: PathDraft | null) { pathDraft = value; setDraftState(value) }
   function setSelectedGameId(value: number | null) {
-    selectGame(value)
+    if (value === null) closeSavePages()
+    else {
+      selectGame(value)
+      showSaveDialog(<GameSavesModal />)
+    }
   }
   const [saves, setSaves] = useState<SaveInfo[]>([])
   const [games, setGames] = useState<GameInfo[]>([])
@@ -201,7 +209,7 @@ const Content: FC<{ side?: boolean }> = ({ side = false }) => {
   }
   function remove(si: SaveInfo, onDeleted?: () => void) {
     showSaveDialog(<ConfirmModal strTitle="删除备份" strDescription={
-      `确定删除「${si.game_info.game_name}」在 ${dateText(si.timestamp)} 的备份吗？此操作无法撤销，游戏当前存档不受影响。`}
+      `确定删除「${si.game_info.game_name}」在 ${dateText(si.timestamp)} 的备份吗？只删除备份，不会删除游戏当前存档。此操作无法撤销。`}
       strOKButtonText="确认删除" strCancelButtonText="取消" onOK={() => action(async () => { await rpc("delete_snapshot", { filename: si.filename }); onDeleted?.() })} />)
   }
   function snapshot(si: SaveInfo) {
@@ -241,13 +249,14 @@ const Content: FC<{ side?: boolean }> = ({ side = false }) => {
             <DialogButton disabled={busy} style={{ flex: 1, width: 0, minWidth: 0 }} onClick={() => action(refresh)}>刷新</DialogButton>
           </Focusable>
           <div style={pathStyle}>{pathText(selectedGame)}</div>
+          <div style={pathStyle}>{`备份保存路径：\n${backupRoot}`}</div>
         </PanelSectionRow>
         <PanelSectionRow><ButtonItem layout="below" disabled={busy || !available} onClick={() => action(() => backup(selectedGame))}>立即备份</ButtonItem></PanelSectionRow>
       </PanelSection>
       <PanelSection title={`选择并管理存档（${gameSaves.length}）`}>
         {gameSaves.length ? gameSaves.map(snapshot) : <p style={{ padding: "0 16px" }}>暂无备份。选择存档路径后，点击“立即备份”保存第一份。</p>}
       </PanelSection>
-      <p style={{ padding: "0 16px", fontSize: 12, opacity: 0.7 }}>全部手动备份，所有记录持续保留，只有手动删除才会移除。</p>
+      <p style={{ padding: "0 16px", fontSize: 12, opacity: 0.7 }}>全部手动备份，所有记录持续保留。删除存档只删除备份，不会删除游戏当前存档。</p>
     </PanelDialog>
   }
   if (side) return null
@@ -265,10 +274,14 @@ const Content: FC<{ side?: boolean }> = ({ side = false }) => {
   </div>
 }
 
+const GameSavesModal: FC<{ closeModal?: () => void }> = () => <ModalRoot closeModal={closeSavePages} onCancel={closeSavePages} bCloseAfterOK={false}>
+  <div aria-label="游戏存档管理" style={{ height: "calc(100vh - 160px)", maxHeight: 520, minHeight: 0 }}>
+    <Content side />
+  </div>
+</ModalRoot>
+
 const SavesOverlay: FC = () => {
-  const [selected, setSelected] = useState<number | null>(managementGameId)
   useEffect(() => {
-    selectionListeners.add(setSelected)
     let closePatch: ReturnType<typeof beforePatch> | undefined
     let patchedMenu: any
     // The QAM document stays mounted when closed. Its menu store, rather than
@@ -293,16 +306,17 @@ const SavesOverlay: FC = () => {
     }
     observeMenu()
     const timer = window.setInterval(observeMenu, 100)
-    return () => { selectionListeners.delete(setSelected); window.clearInterval(timer); closePatch?.unpatch() }
+    return () => { window.clearInterval(timer); closePatch?.unpatch() }
   }, [])
-  return selected === null ? null : <LeftPanel><Content side /></LeftPanel>
+  return null
 }
 
 export default definePlugin(() => {
   accountReady = (async () => {
-    const context = await rpc<{ home: string, steam_root: string }>("get_path_context")
+    const context = await rpc<{ home: string, steam_root: string, backup_root: string }>("get_path_context")
     userHome = context.home
     steamRoot = context.steam_root
+    backupRoot = context.backup_root
     const sid = new SteamID(App.m_CurrentUser.strSteamID)
     await rpc("set_account_id", { id_num: sid.accountid })
   })()

@@ -47,7 +47,7 @@ async function harness(options = {}) {
     async call(method, ...args) {
       calls.push({ method, args });
       switch (method) {
-        case 'get_path_context': return { home: '/home/deck', steam_root: '/Steam' };
+        case 'get_path_context': return { home: '/home/deck', steam_root: '/Steam', backup_root: '/home/deck/homebrew/data/Steamback/saves2' };
         case 'set_account_id': return null;
         case 'find_mounted': return ['/Steam'];
         case 'get_custom_games': return custom;
@@ -56,7 +56,7 @@ async function harness(options = {}) {
         case 'find_supported': return [{ ...args[0][0], save_games_roots: { '/Steam/userdata/123/42/remote': '', '/home/deck/游戏存档': '_1' } }];
         case 'get_saveinfos': return saves.map(s => ({ ...s }));
         case 'do_backup': return saves[0];
-        case 'update_snapshot': { const i = saves.findIndex(s => s.filename === args[0]); saves[i] = { ...saves[i], pinned: args[1], note: args[2], ...(args[3] === undefined ? {} : { name: args[3] }) }; return saves[i]; }
+        case 'update_snapshot': { if (options.renameFails) throw Error('模拟保存失败'); const i = saves.findIndex(s => s.filename === args[0]); saves[i] = { ...saves[i], pinned: args[1], note: args[2], ...(args[3] === undefined ? {} : { name: args[3] }) }; return saves[i]; }
         case 'delete_snapshot': saves = saves.filter(s => s.filename !== args[0]); return true;
         case 'do_restore': return null;
         default: throw Error(`unexpected RPC: ${method}`);
@@ -75,6 +75,7 @@ async function harness(options = {}) {
       modal = element;
       let resolve;
       const result = { closed: false, ClosedPromise: new Promise(r => { resolve = r; }), Close() { result.closed = true; resolve(); } };
+      modal = { ...element, props: { ...element.props, closeModal: result.Close } };
       dialogs.push(result);
       return result;
     },
@@ -109,14 +110,14 @@ async function harness(options = {}) {
     return [tree, ...Object.values(tree.props || {}).flatMap(nodes)];
   }
   const find = (tree, type, predicate) => nodes(tree).find(n => n.type === type && predicate(n.props));
+  render(globalComponent());
   render();
   effects.splice(0).forEach(effect => effect());
   await new Promise(resolve => setImmediate(resolve));
   function manage() {
     find(render(plugin.content), 'ButtonItem', p => p['aria-label'] === '打开游戏存档 42').props.onClick();
-    const overlay = globalComponent();
-    const left = render(overlay);
-    page = left.props.children[0];
+    const manager = render(modal);
+    page = nodes(manager).find(n => typeof n.type === 'function' && n.props.side);
     render();
   }
   async function remount() {
@@ -126,18 +127,14 @@ async function harness(options = {}) {
     await new Promise(resolve => setImmediate(resolve));
   }
   async function flush() { effects.splice(0).forEach(effect => effect()); await new Promise(resolve => setImmediate(resolve)); }
-  function leftBounds() {
-    const overlay = render(globalComponent());
-    return render(overlay).props.style;
-  }
-  return { render, find, nodes, calls, listener, running, manage, remount, flush, leftBounds, modal: () => modal, dialogs,
+  return { render, find, nodes, calls, listener, running, manage, remount, flush, modal: () => modal, dialogs,
     async sideMenu(value) { if (value === 0) menuStore.CloseSideMenus(); else menu = value; timers.forEach(fn => fn()); await flush(); },
     async tick() { timers.forEach(fn => fn()); await flush(); },
     overlay: () => render(globalComponent()),
     button: (tree, label) => find(tree, 'ButtonItem', p => p.children.includes(label)) };
 }
 
-test('首页仅刷新与游戏列表，点击游戏打开独立左侧存档页，仅手动备份', async () => {
+test('首页仅刷新与游戏列表，点击游戏打开 Steam 原生存档弹窗，仅手动备份', async () => {
   const h = await harness();
   const tree = h.render();
   assert.ok(h.button(tree, '刷新'));
@@ -166,16 +163,27 @@ test('存档统一按时间倒序，无固定按钮；详情两行操作、重�
   assert.equal(rows[1].props['aria-label'], `存档详情 ${saves[1].filename}`);
   button(`存档详情 ${saves[0].filename}`).props.onClick();
   const details = h.modal();
+  const detailDialog = h.dialogs.at(-1);
+  const gameDialog = h.dialogs[0];
   let tree = h.render(details);
+  assert.equal(tree.props.bCloseAfterOK, false);
   h.find(tree, 'TextField', p => p.label.startsWith('存档名称')).props.onChange({ target: { value: '首领前' } });
   assert.equal(h.find(tree, 'TextField', p => p.label.startsWith('备注')), undefined);
+  assert.ok(h.nodes(tree).some(n => n.props?.children?.includes('删除存档只删除备份，不会删除游戏当前存档。')));
   const column = h.find(tree, 'Focusable', p => p.style?.flexDirection === 'column');
-  assert.equal(column.props.style.gap, 12);
+  let prevented = false, stopped = false;
+  column.props.onSubmit({ preventDefault() { prevented = true; }, stopPropagation() { stopped = true; } });
+  assert.ok(prevented && stopped);
+  assert.equal(column.props.style.gap, 8);
   const rowsOfActions = h.nodes(tree).filter(n => n.type === 'Focusable' && n.props['flow-children'] === 'row');
   assert.deepEqual(rowsOfActions.map(row => h.nodes(row).filter(n => n.type === 'DialogButton').map(n => n.props.children.join(''))),
     [['恢复存档', '删除存档'], ['保存名称', '关闭']]);
   tree = h.render(details);
   await h.find(tree, 'DialogButton', p => p.children.includes('保存名称')).props.onClick();
+  await h.tick();
+  assert.equal(detailDialog.closed, true);
+  assert.equal(gameDialog.closed, false);
+  assert.ok(h.nodes(h.render()).some(n => n.props?.children?.includes('首领前')));
   assert.equal(h.calls.filter(c => c.method === 'update_snapshot').at(-1).args[3], '首领前');
   assert.equal(h.calls.filter(c => c.method === 'update_snapshot').at(-1).args[2], '原有备注');
   assert.equal(h.calls.filter(c => c.method === 'update_snapshot').at(-1).args[1], true);
@@ -183,16 +191,29 @@ test('存档统一按时间倒序，无固定按钮；详情两行操作、重�
   button(`存档详情 ${saves[0].filename}`).props.onClick();
   tree = h.render(h.modal());
   h.find(tree, 'DialogButton', p => p.children.includes('删除存档')).props.onClick();
+  assert.match(h.modal().props.strDescription, /只删除备份，不会删除游戏当前存档/);
   assert.equal(h.calls.filter(c => c.method === 'delete_snapshot').length, 0);
   await h.modal().props.onOK();
   assert.equal(h.calls.find(c => c.method === 'delete_snapshot').args[0], saves[0].filename);
 });
 
-test('收起侧栏清空左侧选择、路径草稿及本插件所有弹窗，重新打开仅显示首页', async () => {
+test('名称保存失败时保留详情和游戏管理弹窗，可用关闭仅退出详情', async () => {
+  const h = await harness({ renameFails: true }); h.manage(); await h.flush();
+  h.find(h.render(), 'DialogButton', p => p['aria-label']?.startsWith('存档详情 ')).props.onClick();
+  const details = h.modal();
+  await h.find(h.render(details), 'DialogButton', p => p.children.includes('保存名称')).props.onClick();
+  assert.ok(h.dialogs.every(d => !d.closed));
+  assert.ok(h.find(h.render(details), 'p', p => p.role === 'alert'));
+  h.find(h.render(details), 'DialogButton', p => p.children.includes('关闭')).props.onClick();
+  assert.equal(h.dialogs.at(-1).closed, true);
+  assert.equal(h.dialogs[0].closed, false);
+});
+
+test('收起侧栏清空管理页选择、路径草稿及本插件所有弹窗，重新打开仅显示首页', async () => {
   const h = await harness(); h.manage(); await h.flush();
   h.find(h.render(), 'DialogButton', p => p['aria-label']?.startsWith('存档详情 ')).props.onClick();
   h.find(h.render(h.modal()), 'DialogButton', p => p.children.includes('删除存档')).props.onClick();
-  assert.equal(h.dialogs.length, 2);
+  assert.equal(h.dialogs.length, 3);
   await h.tick();
   assert.ok(h.dialogs.every(d => !d.closed));
   await h.sideMenu(0);
@@ -224,14 +245,16 @@ test('运行中详情仍可打开，禁用恢复且确认时再次检查', async
   assert.equal(h.calls.filter(c => c.method === 'do_restore').length, 0);
 });
 
-test('管理页依次为选择路径、完整路径和逐行备份，自动与自选路径可区分', async () => {
+test('管理页依次为选择路径、游戏路径、实际备份路径和逐行备份，说明删除范围', async () => {
   for (const custom of [[], [{ game_id: 42, game_name: '测试游戏', install_root: '/Steam', paths: ['/home/deck/自选槽位.sav', '/run/media/存档'] }]]) {
     const h = await harness({ custom }); h.manage(); await h.flush();
     const nodes = h.nodes(h.render());
     const choose = nodes.findIndex(n => n.type === 'DialogButton' && n.props.children.includes('选择路径'));
     const path = nodes.findIndex(n => n.type === 'div' && n.props.children.some(c => typeof c === 'string' && c.includes('存档路径：')));
     const records = nodes.findIndex(n => n.type === 'DialogButton' && n.props['aria-label']?.startsWith('存档详情 '));
-    assert.ok(choose >= 0 && path > choose && records > path);
+    const backupPath = nodes.findIndex(n => n.type === 'div' && n.props.children.includes('备份保存路径：\n/home/deck/homebrew/data/Steamback/saves2'));
+    assert.ok(choose >= 0 && path > choose && backupPath > path && records > backupPath);
+    assert.ok(nodes.some(n => n.props?.children?.some(c => typeof c === 'string' && c.includes('删除存档只删除备份，不会删除游戏当前存档。'))));
     assert.equal(nodes[path].props.children.join(''), custom.length ? '自选存档路径：\n/home/deck/自选槽位.sav\n/run/media/存档' : '自动识别的存档路径：\n/Steam/userdata/123/42/remote\n/home/deck/游戏存档');
     h.render().props.onOK();
   }
@@ -273,13 +296,11 @@ test('内嵌选择草稿跨 Steam 重建保留，取消不写配置', async () =
   assert.equal(h.calls.filter(c => c.method === 'set_custom_game').length, 0);
 });
 
-test('左侧面板使用实际 CSS 视口，与 Decky 边界相接，不留黑边', async () => {
-  for (const width of [854, 1280, 600]) {
-    const h = await harness({ width: 1, mainWidth: width });
-    h.manage(); await h.flush();
-    const style = h.leftBounds();
-    assert.equal(style.left, 0);
-    assert.equal(style.width + 348, width);
-    assert.equal(style.height, 534);
-  }
+test('游戏管理使用原生 ModalRoot，路径与列表置于可滚动区域，关闭会关闭全部本插件弹窗', async () => {
+  const h = await harness(); h.manage(); await h.flush();
+  const manager = h.dialogs[0];
+  assert.equal(manager.closed, false);
+  h.render().props.onOK();
+  assert.equal(manager.closed, true);
+  assert.equal(h.overlay(), null);
 });

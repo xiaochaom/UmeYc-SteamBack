@@ -367,8 +367,9 @@ class Engine(CustomSaves):
         # Add the autocloud dirs to the simple directories we found
         foundDirs.extend(autoRoots)
 
-        # remove any duplicates (by briefly converting into a dict, which preserves order)
-        foundDirs = list(dict.fromkeys(foundDirs))
+        # Proton exposes Windows compatibility aliases as symlinks. Store each
+        # real directory once so both the UI and new backups use one copy.
+        foundDirs = list(dict.fromkeys(os.path.realpath(d) for d in foundDirs))
         return foundDirs
 
     """ 
@@ -799,7 +800,12 @@ class Engine(CustomSaves):
                 return None
 
         # logger.debug(f'find supported { game_infos }')
-        supported = list(filter(try_rcf, game_infos))
+        # Saved metadata may contain old aliases and suffixes. Discover fresh
+        # roots on copies; never rewrite mappings needed to restore old backups.
+        candidates = [dict(info) for info in game_infos]
+        for info in candidates:
+            info.pop("save_games_roots", None)
+        supported = list(filter(try_rcf, candidates))
         return supported
 
     """

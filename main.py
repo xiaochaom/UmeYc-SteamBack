@@ -35,7 +35,9 @@ class Plugin:
         return list_save_files(directory)
 
     async def get_path_context(self):
-        return {"home": os.path.expanduser("~"), "steam_root": get_engine().get_steam_root()}
+        engine = get_engine()
+        return {"home": os.path.expanduser("~"), "steam_root": engine.get_steam_root(),
+                "backup_root": engine._get_savesdir()}
 
     async def delete_snapshot(self, filename: str):
         return await get_engine().delete_snapshot(filename)
