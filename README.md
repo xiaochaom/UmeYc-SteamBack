@@ -43,13 +43,13 @@
 
 ## 安装 Decky 插件
 
-从本仓库的 GitHub Actions 构建产物下载 `UmeYc-SteamBack-1.2.0.zip`，解压后将其中的 `Steamback` 文件夹放到：
+从 [GitHub Releases](https://github.com/xiaochaom/UmeYc-SteamBack/releases/latest) 下载 `UmeYc-SteamBack-1.2.0.zip`，可使用 Decky 的 ZIP 安装功能；发布页同时提供 `SHA256SUMS.txt` 校验文件。也可以解压后将其中的 `Steamback` 文件夹放到：
 
 ```text
 /home/deck/homebrew/plugins/Steamback
 ```
 
-然后重启 Decky。开发构建也可使用 Decky 的 ZIP 安装功能。
+手动放置文件后重启 Decky。开发构建可从 GitHub Actions 获取。
 
 插件内部名称保留 `Steamback`，以延续上游的配置与备份目录；不要同时安装上游版和本改造版。
 
