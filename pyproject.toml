@@ -24,7 +24,7 @@ python = "^3.11"
 platformdirs = "^4.0.0"
 pillow = "^10.1.0"
 psutil = "^5.9.1"
-async-tkinter-loop = ">=0.7,<0.10"
+async-tkinter-loop = ">=0.10.4,<0.11"
 sv-ttk = "^2.4"
 
 [tool.poetry.group.dev.dependencies]
