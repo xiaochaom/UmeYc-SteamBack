@@ -1,12 +1,14 @@
 import {
   ButtonItem, PanelSection, PanelSectionRow,
-  quickAccessMenuClasses, showModal, ConfirmModal, Navigation,
-  Router, ModalRoot, DialogButton, TextField, Focusable
+  quickAccessMenuClasses, showModal, ConfirmModal,
+  Router, ModalRoot, DialogButton, TextField, Focusable, beforePatch
 } from "@decky/ui"
-import { FC, useState, useEffect } from "react"
-import { call, definePlugin, toaster } from "@decky/api"
-import { FiDownload, FiUpload } from "react-icons/fi"
+import { FC, ReactNode, useState, useEffect } from "react"
+import { call, definePlugin, routerHook } from "@decky/api"
+import { FiDownload } from "react-icons/fi"
 import SteamID from "steamid"
+import { LeftPanel } from "./components/left-panel"
+import { PanelDialog } from "./components/panel-dialog"
 import { SavePaths, PathDraft } from "./components/save-paths"
 
 interface GameInfo {
@@ -32,6 +34,33 @@ let accountReady: Promise<unknown>
 // Keep the current management location for the lifetime of this plugin load.
 let managementGameId: number | null = null
 let pathDraft: PathDraft | null = null
+const selectionListeners = new Set<(id: number | null) => void>()
+const saveDialogs = new Set<ReturnType<typeof showModal>>()
+let openingSaveDialog = 0
+let pendingDialogMenuClose = false
+function showSaveDialog(content: ReactNode) {
+  // Steam closes side menus when the new modal portal mounts, after showModal
+  // returns. Consume that single automatic close as part of opening the dialog.
+  pendingDialogMenuClose = true
+  openingSaveDialog++
+  let dialog: ReturnType<typeof showModal>
+  try { dialog = showModal(content) }
+  finally { openingSaveDialog-- }
+  saveDialogs.add(dialog)
+  void dialog.ClosedPromise.finally(() => saveDialogs.delete(dialog))
+  return dialog
+}
+function closeSavePages() {
+  selectGame(null)
+  const dialogs = [...saveDialogs]
+  saveDialogs.clear()
+  dialogs.reverse().forEach(dialog => dialog.Close())
+}
+function selectGame(id: number | null) {
+  managementGameId = id
+  pathDraft = null
+  selectionListeners.forEach(listener => listener(id))
+}
 const title = "UmeYc-SteamBack"
 const dateText = (timestamp: number) => new Date(timestamp).toLocaleString("zh-CN", {
   year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit",
@@ -50,7 +79,6 @@ async function rpc<T>(method: string, args: Record<string, unknown> = {}): Promi
 }
 function report(error: unknown) {
   console.error(title, error)
-  toaster.toast({ title: "操作失败", body: String(error) })
 }
 async function installedGames(): Promise<GameInfo[]> {
   const folders = await SteamClient.InstallFolder.GetInstallFolders() as any[]
@@ -75,7 +103,7 @@ async function installedGames(): Promise<GameInfo[]> {
 async function backup(game: GameInfo) {
   await accountReady
   const save = await rpc<SaveInfo | null>("do_backup", { game_info: game, dry_run: false })
-  toaster.toast({ title, body: save ? `已备份「${game.game_name}」` : `「${game.game_name}」没有可备份的文件`, icon: <FiDownload /> })
+  if (!save) throw new Error(`「${game.game_name}」没有可备份的文件`)
 }
 
 const SnapshotDetails: FC<{
@@ -83,45 +111,44 @@ const SnapshotDetails: FC<{
   onDelete: (onDeleted: () => void) => void, closeModal?: () => void
 }> = ({ save, onSaved, onRestore, onDelete, closeModal }) => {
   const [name, setName] = useState(save.name || "")
-  const [note, setNote] = useState(save.note || "")
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
   return <ModalRoot closeModal={closeModal} onCancel={closeModal}>
-    <h2>存档详情</h2>
+    <Focusable flow-children="column" style={{ display: "flex", flexDirection: "column", gap: 12, minWidth: 0, width: "100%", maxHeight: "80vh", overflowY: "auto" }}>
+    <h2 style={{ margin: 0 }}>存档详情</h2>
     <p>{save.game_info.game_name} · {dateText(save.timestamp)}</p>
-    <p>{save.is_undo ? "撤销备份" : save.pinned ? "📌 已固定 · 置顶显示" : "普通备份"}</p>
-    <>
+    <p>{save.is_undo ? "撤销备份" : "手动备份"}</p>
       <TextField label="存档名称（最多 100 字）" value={name} onChange={e => setName(e.target.value)} />
-      <TextField label="备注（最多 500 字）" value={note} onChange={e => setNote(e.target.value)} />
       {error && <p role="alert">{error}</p>}
-      <DialogButton disabled={busy || name.length > 100 || note.length > 500} onClick={async () => {
+      <Focusable flow-children="row" style={{ display: "flex", gap: 12, flexShrink: 0 }}>
+        <DialogButton style={{ flex: "1 1 0", width: 0, minWidth: 0 }} disabled={busy || Router.RunningApps.some(a => Number(a.appid) === save.game_info.game_id)} onClick={onRestore}>
+          {save.is_undo ? "撤销恢复" : "恢复存档"}
+        </DialogButton>
+        <DialogButton style={{ flex: "1 1 0", width: 0, minWidth: 0 }} disabled={busy} onClick={() => onDelete(() => closeModal?.())}>删除存档</DialogButton>
+      </Focusable>
+      <Focusable flow-children="row" style={{ display: "flex", gap: 12, flexShrink: 0 }}>
+      <DialogButton style={{ flex: "1 1 0", width: 0, minWidth: 0 }} disabled={busy || name.length > 100} onClick={async () => {
         setBusy(true)
         try {
-          await rpc("update_snapshot", { filename: save.filename, pinned: save.pinned, note, name })
+          await rpc("update_snapshot", { filename: save.filename, pinned: save.pinned, note: save.note || "", name })
           await onSaved()
           closeModal?.()
         } catch (e) { setError(String(e)) }
         finally { setBusy(false) }
-      }}>{busy ? "正在保存…" : "保存名称与备注"}</DialogButton>
-    </>
-    <DialogButton disabled={busy || Router.RunningApps.some(a => Number(a.appid) === save.game_info.game_id)} onClick={onRestore}>
-      {save.is_undo ? "撤销恢复" : "恢复此存档"}
-    </DialogButton>
-    <DialogButton disabled={busy} onClick={() => onDelete(() => closeModal?.())}>删除此存档</DialogButton>
-    <DialogButton disabled={busy} onClick={closeModal}>关闭</DialogButton>
+      }}>{busy ? "正在保存…" : "保存名称"}</DialogButton>
+      <DialogButton style={{ flex: "1 1 0", width: 0, minWidth: 0 }} disabled={busy} onClick={closeModal}>关闭</DialogButton>
+      </Focusable>
+    </Focusable>
   </ModalRoot>
 }
 
-const Content: FC = () => {
+const Content: FC<{ side?: boolean }> = ({ side = false }) => {
   const [selectedGameId, setSelectedGameState] = useState<number | null>(managementGameId)
   const [draft, setDraftState] = useState<PathDraft | null>(pathDraft)
   function setDraft(value: PathDraft | null) { pathDraft = value; setDraftState(value) }
   function setSelectedGameId(value: number | null) {
-    managementGameId = value
-    setSelectedGameState(value)
+    selectGame(value)
   }
-  const [readyCollapsed, setReadyCollapsed] = useState(false)
-  const [availableCollapsed, setAvailableCollapsed] = useState(true)
   const [saves, setSaves] = useState<SaveInfo[]>([])
   const [games, setGames] = useState<GameInfo[]>([])
   const [supported, setSupported] = useState<GameInfo[]>([])
@@ -145,9 +172,14 @@ const Content: FC = () => {
   async function action(work: () => Promise<unknown>) {
     setBusy(true)
     try { await work(); await refreshSaves() }
-    catch (e) { report(e) }
+    catch (e) { report(e); setError(String(e)) }
     finally { setBusy(false) }
   }
+  useEffect(() => {
+    const listener = (id: number | null) => { setSelectedGameState(id); setDraftState(null) }
+    selectionListeners.add(listener)
+    return () => { selectionListeners.delete(listener) }
+  }, [])
   useEffect(() => {
     refresh().catch(e => setError(String(e))).finally(() => setLoading(false))
     const timer = window.setInterval(() => refreshSaves().catch(console.error), 5000)
@@ -160,33 +192,27 @@ const Content: FC = () => {
     setDraft({ game, paths: configured?.paths || [], directory: configured?.paths?.[0] || Object.keys(detected?.save_games_roots || {})[0] || userHome, picking: false })
   }
   function restore(si: SaveInfo) {
-    showModal(<ConfirmModal strTitle={si.is_undo ? "撤销上次恢复" : "恢复存档"}
+    showSaveDialog(<ConfirmModal strTitle={si.is_undo ? "撤销上次恢复" : "恢复存档"}
       strDescription={`将「${si.game_info.game_name}」恢复到 ${dateText(si.timestamp)} 的备份。请先退出游戏；恢复前会保存可撤销备份。${si.note ? `备注：${si.note}` : ""}`}
       strOKButtonText="确认恢复" strCancelButtonText="取消" onOK={() => action(async () => {
         if (Router.RunningApps.some(a => Number(a.appid) === si.game_info.game_id)) throw new Error("请先退出游戏再恢复存档")
         await rpc("do_restore", { save_info: { filename: si.filename } })
-        toaster.toast({ title, body: `已恢复「${si.game_info.game_name}」`, icon: <FiUpload /> })
       })} />)
   }
   function remove(si: SaveInfo, onDeleted?: () => void) {
-    showModal(<ConfirmModal strTitle="删除备份" strDescription={
-      `确定删除「${si.game_info.game_name}」在 ${dateText(si.timestamp)} 的${si.pinned ? "固定" : ""}备份吗？${si.note ? `备注：${si.note}。` : ""}此操作无法撤销，游戏当前存档不受影响。`}
+    showSaveDialog(<ConfirmModal strTitle="删除备份" strDescription={
+      `确定删除「${si.game_info.game_name}」在 ${dateText(si.timestamp)} 的备份吗？此操作无法撤销，游戏当前存档不受影响。`}
       strOKButtonText="确认删除" strCancelButtonText="取消" onOK={() => action(async () => { await rpc("delete_snapshot", { filename: si.filename }); onDeleted?.() })} />)
   }
   function snapshot(si: SaveInfo) {
     return <PanelSectionRow key={si.filename}>
       <Focusable flow-children="row" style={{ display: "flex", gap: 8, minWidth: 0 }}>
         <DialogButton style={{ flex: "1 1 0", minWidth: 0, textAlign: "left", padding: "10px 12px" }} disabled={busy}
-          aria-label={`存档详情 ${si.filename}`} onClick={() => showModal(<SnapshotDetails save={si} onSaved={refreshSaves}
+          aria-label={`存档详情 ${si.filename}`} onClick={() => showSaveDialog(<SnapshotDetails save={si} onSaved={refreshSaves}
             onRestore={() => restore(si)} onDelete={onDeleted => remove(si, onDeleted)} />)}>
-          <span style={{ display: "block", fontSize: 13, whiteSpace: "normal", overflowWrap: "anywhere" }}>{si.name || (si.is_undo ? "撤销备份" : si.pinned ? "📌 固定存档" : "普通存档")}</span>
+          <span style={{ display: "block", fontSize: 13, whiteSpace: "normal", overflowWrap: "anywhere" }}>{si.name || (si.is_undo ? "撤销备份" : "手动存档")}</span>
           <span style={{ display: "block", fontSize: 12, whiteSpace: "normal" }}>{dateText(si.timestamp)}</span>
           {si.note && <span style={{ display: "block", fontSize: 12, opacity: 0.75, whiteSpace: "normal", overflowWrap: "anywhere" }}>{si.note}</span>}
-        </DialogButton>
-        <DialogButton aria-label={`${si.pinned ? "解除固定" : "固定"} ${si.filename}`}
-          style={{ flex: "0 0 72px", minWidth: 72, padding: "8px 4px", fontSize: 12 }} disabled={busy}
-          onClick={() => action(() => rpc("update_snapshot", { filename: si.filename, pinned: !si.pinned, note: si.note || "" }))}>
-          {si.pinned ? "已固定" : "固定"}
         </DialogButton>
       </Focusable>
     </PanelSectionRow>
@@ -198,33 +224,17 @@ const Content: FC = () => {
     return paths.length ? `${configured ? "自选存档路径" : "自动识别的存档路径"}：\n${paths.join("\n")}` : "未找到存档路径，请自行选择"
   }
   const pathStyle = { whiteSpace: "pre-wrap" as const, overflowWrap: "anywhere" as const, margin: "8px 0", fontSize: 12, opacity: 0.75 }
-  function gameGroup(hasPath: boolean) {
-    const group = games.filter(g => (custom.some(c => c.game_id === g.game_id) || supported.some(c => c.game_id === g.game_id)) === hasPath)
-    const collapsed = hasPath ? readyCollapsed : availableCollapsed
-    return <PanelSection title={`${hasPath ? "已找到存档路径" : "待选择存档路径"}（${group.length}）`}>
-      <PanelSectionRow><ButtonItem layout="below" onClick={() => hasPath ? setReadyCollapsed(!collapsed) : setAvailableCollapsed(!collapsed)}>
-        {collapsed ? "展开游戏列表 ▾" : "收起游戏列表 ▴"}
-      </ButtonItem></PanelSectionRow>
-      {!collapsed && group.map(game => <PanelSectionRow key={game.game_id}>
-        <div style={{ padding: "8px 0", fontWeight: 600 }}>{game.game_name}</div>
-        <p style={pathStyle}>{pathText(game)}</p>
-        <ButtonItem layout="below" disabled={busy} onClick={() => configure(game)}>选择存档路径</ButtonItem>
-        <ButtonItem layout="below" disabled={busy} onClick={() => setSelectedGameId(game.game_id)}>管理存档</ButtonItem>
-      </PanelSectionRow>)}
-      {!collapsed && !group.length && <p style={{ padding: "0 16px" }}>暂无游戏</p>}
-    </PanelSection>
-  }
-  if (draft) return <SavePaths draft={draft} games={games} custom={custom} home={userHome} onDraft={setDraft}
+  if (side && draft) return <SavePaths draft={draft} games={games} custom={custom} home={userHome} onDraft={setDraft}
     onCancel={() => setDraft(null)} onSaved={async () => { await refresh(); setDraft(null) }} />
-  if (selectedGameId !== null && loading && games.length === 0) return <p style={{ padding: "0 16px" }}>正在读取存档…</p>
+  if (side && selectedGameId !== null && loading && games.length === 0) return <p style={{ padding: "0 16px" }}>正在读取存档…</p>
   const selectedGame = games.find(g => g.game_id === selectedGameId)
-  if (selectedGame) {
+  if (side && selectedGame) {
     const gameSaves = saves.filter(s => s.game_info.game_id === selectedGame.game_id)
-    gameSaves.sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.timestamp - a.timestamp)
+    gameSaves.sort((a, b) => b.timestamp - a.timestamp)
     const available = supported.some(g => g.game_id === selectedGame.game_id)
-    return <div>
-      <PanelSection title={selectedGame.game_name}>
-        <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={() => setSelectedGameId(null)}>返回游戏列表</ButtonItem></PanelSectionRow>
+    return <PanelDialog strTitle={selectedGame.game_name} strOKButtonText="关闭" bAlertDialog onOK={() => setSelectedGameId(null)} onCancel={() => setSelectedGameId(null)}>
+      <PanelSection>
+        {error && <p role="alert" style={{ padding: "0 16px", color: "#ffaaaa" }}>操作失败：{error}</p>}
         <PanelSectionRow>
           <Focusable flow-children="row" style={{ display: "flex", gap: 8 }}>
             <DialogButton disabled={busy} style={{ flex: 1, width: 0, minWidth: 0 }} onClick={() => configure(selectedGame)}>选择路径</DialogButton>
@@ -237,22 +247,55 @@ const Content: FC = () => {
       <PanelSection title={`选择并管理存档（${gameSaves.length}）`}>
         {gameSaves.length ? gameSaves.map(snapshot) : <p style={{ padding: "0 16px" }}>暂无备份。选择存档路径后，点击“立即备份”保存第一份。</p>}
       </PanelSection>
-      <p style={{ padding: "0 16px", fontSize: 12, opacity: 0.7 }}>全部手动备份，所有记录持续保留，只有手动删除才会移除。固定记录置顶显示。</p>
-    </div>
+      <p style={{ padding: "0 16px", fontSize: 12, opacity: 0.7 }}>全部手动备份，所有记录持续保留，只有手动删除才会移除。</p>
+    </PanelDialog>
   }
+  if (side) return null
   return <div>
-    <p style={{ padding: "0 16px" }}>选择游戏后点击“立即备份”保存当前进度。所有备份持续保留，固定存档置顶显示。</p>
-    {error && <p style={{ padding: "0 16px", color: "#ffaaaa" }}>加载失败：{error}</p>}
-    <PanelSection title="备份设置">
-      <PanelSectionRow><ButtonItem layout="below" disabled={loading || busy} onClick={() => configure()}>选择游戏与存档路径</ButtonItem></PanelSectionRow>
-      <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={() => action(refresh)}>刷新列表</ButtonItem></PanelSectionRow>
+    <PanelSection>
+      <PanelSectionRow><ButtonItem layout="below" disabled={busy || loading} onClick={() => action(refresh)}>刷新</ButtonItem></PanelSectionRow>
     </PanelSection>
-    {loading ? <p style={{ padding: "0 16px" }}>正在识别游戏存档…</p> : <div>{gameGroup(true)}{gameGroup(false)}</div>}
-    <PanelSectionRow><ButtonItem layout="below" onClick={() => {
-      Navigation.CloseSideMenus()
-      Navigation.NavigateToExternalWeb("https://github.com/xiaochaom/UmeYc-SteamBack#readme")
-    }}>使用说明</ButtonItem></PanelSectionRow>
+    {error && <p role="alert" style={{ padding: "0 16px", color: "#ffaaaa" }}>加载失败：{error}</p>}
+    <PanelSection title={`游戏（${games.length}）`}>
+      {loading ? <p style={{ padding: "0 16px" }}>正在读取游戏…</p> : games.map(game => <PanelSectionRow key={game.game_id}>
+        <ButtonItem layout="below" disabled={busy} aria-label={`打开游戏存档 ${game.game_id}`} onClick={() => setSelectedGameId(game.game_id)}>{game.game_name}</ButtonItem>
+      </PanelSectionRow>)}
+      {!loading && games.length === 0 && <p style={{ padding: "0 16px" }}>暂无游戏，请刷新列表。</p>}
+    </PanelSection>
   </div>
+}
+
+const SavesOverlay: FC = () => {
+  const [selected, setSelected] = useState<number | null>(managementGameId)
+  useEffect(() => {
+    selectionListeners.add(setSelected)
+    let closePatch: ReturnType<typeof beforePatch> | undefined
+    let patchedMenu: any
+    // The QAM document stays mounted when closed. Its menu store, rather than
+    // document visibility or a temporary modal/remount, owns this lifecycle.
+    const observeMenu = () => {
+      const host = window as any
+      const main = host.SteamUIStore?.WindowStore?.GamepadUIMainWindowInstance
+      const store = main?.MenuStore ?? host.SteamUIStore?.GetFocusedWindowInstance?.()?.MenuStore
+      if (store !== patchedMenu && typeof store?.CloseSideMenus === "function") {
+        closePatch?.unpatch()
+        patchedMenu = store
+        closePatch = beforePatch(store, "CloseSideMenus", () => {
+          if (pendingDialogMenuClose) { pendingDialogMenuClose = false; return }
+          if (!openingSaveDialog && (managementGameId !== null || saveDialogs.size)) closeSavePages()
+        })
+      }
+      const menu = store?.GetOpenSideMenu?.()
+      // Steam's native modal closes the QAM while retaining the last request.
+      // Its own opening must not dismiss itself. Explicit menu-close calls are
+      // handled above even when the native modal already made menu === 0.
+      if (menu !== undefined && menu !== 2 && !saveDialogs.size && !openingSaveDialog && managementGameId !== null) closeSavePages()
+    }
+    observeMenu()
+    const timer = window.setInterval(observeMenu, 100)
+    return () => { selectionListeners.delete(setSelected); window.clearInterval(timer); closePatch?.unpatch() }
+  }, [])
+  return selected === null ? null : <LeftPanel><Content side /></LeftPanel>
 }
 
 export default definePlugin(() => {
@@ -264,10 +307,15 @@ export default definePlugin(() => {
     await rpc("set_account_id", { id_num: sid.accountid })
   })()
   accountReady.catch(report)
+  routerHook.addGlobalComponent("UmeYc-SteamBack-Saves", () => <SavesOverlay />)
   return {
     name: "UmeYc-SteamBack",
     titleView: <div className={quickAccessMenuClasses.Title}>{title}</div>,
     content: <Content />,
-    icon: <FiDownload />
+    icon: <FiDownload />,
+    onDismount() {
+      closeSavePages()
+      routerHook.removeGlobalComponent("UmeYc-SteamBack-Saves")
+    }
   }
 })
