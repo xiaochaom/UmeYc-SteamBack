@@ -16,6 +16,7 @@ interface GameInfo {
   install_root: string
   paths?: string[]
   save_games_roots?: Record<string, string>
+  current_save_time?: number | null
 }
 interface SaveInfo {
   game_info: GameInfo
@@ -77,6 +78,23 @@ const parameterNames: Record<string, string[]> = {
 async function rpc<T>(method: string, args: Record<string, unknown> = {}): Promise<T> {
   return call<unknown[], T>(method, ...parameterNames[method].map(name => args[name]))
 }
+async function ensureAccount() {
+  await accountReady
+  // Decky can load before Steam has populated the current user. Re-read it on
+  // every scan/backup, including after a backend restart or account change.
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const raw = App.m_CurrentUser?.strSteamID || "0"
+    if (/^\d+$/.test(raw)) {
+      const sid = new SteamID(raw)
+      if (sid.isValidIndividual()) {
+        await rpc("set_account_id", { id_num: sid.accountid })
+        return
+      }
+    }
+    if (attempt < 19) await new Promise(resolve => setTimeout(resolve, 500))
+  }
+  throw new Error("Steam 账号尚未加载，请稍后点击刷新")
+}
 function report(error: unknown) {
   console.error(title, error)
 }
@@ -101,7 +119,7 @@ async function installedGames(): Promise<GameInfo[]> {
   return games
 }
 async function backup(game: GameInfo) {
-  await accountReady
+  await ensureAccount()
   const save = await rpc<SaveInfo | null>("do_backup", { game_info: game, dry_run: false })
   if (!save) throw new Error(`「${game.game_name}」没有可备份的文件`)
 }
@@ -166,7 +184,7 @@ const Content: FC<{ side?: boolean }> = ({ side = false }) => {
   const [error, setError] = useState("")
   async function refreshSaves() { setSaves(await rpc<SaveInfo[]>("get_saveinfos")) }
   async function refresh() {
-    await accountReady
+    await ensureAccount()
     const [installed, configured] = await Promise.all([installedGames(), rpc<GameInfo[]>("get_custom_games")])
     const currentSaves = await rpc<SaveInfo[]>("get_saveinfos")
     setSaves(currentSaves)
@@ -205,6 +223,7 @@ const Content: FC<{ side?: boolean }> = ({ side = false }) => {
       strOKButtonText="确认恢复" strCancelButtonText="取消" onOK={() => action(async () => {
         if (Router.RunningApps.some(a => Number(a.appid) === si.game_info.game_id)) throw new Error("请先退出游戏再恢复存档")
         await rpc("do_restore", { save_info: { filename: si.filename } })
+        await refresh()
       })} />)
   }
   function remove(si: SaveInfo, onDeleted?: () => void) {
@@ -240,6 +259,7 @@ const Content: FC<{ side?: boolean }> = ({ side = false }) => {
     const gameSaves = saves.filter(s => s.game_info.game_id === selectedGame.game_id)
     gameSaves.sort((a, b) => b.timestamp - a.timestamp)
     const available = supported.some(g => g.game_id === selectedGame.game_id)
+    const currentSaveTime = supported.find(g => g.game_id === selectedGame.game_id)?.current_save_time
     return <PanelDialog strTitle={selectedGame.game_name} strOKButtonText="关闭" bAlertDialog onOK={() => setSelectedGameId(null)} onCancel={() => setSelectedGameId(null)}>
       <PanelSection>
         {error && <p role="alert" style={{ padding: "0 16px", color: "#ffaaaa" }}>操作失败：{error}</p>}
@@ -250,6 +270,7 @@ const Content: FC<{ side?: boolean }> = ({ side = false }) => {
           </Focusable>
           <div style={pathStyle}>{pathText(selectedGame)}</div>
           <div style={pathStyle}>{`备份保存路径：\n${backupRoot}`}</div>
+          <div style={pathStyle}>{`当前游戏存档时间：${currentSaveTime == null ? "未找到存档文件" : dateText(currentSaveTime)}`}</div>
         </PanelSectionRow>
         <PanelSectionRow><ButtonItem layout="below" disabled={busy || !available} onClick={() => action(() => backup(selectedGame))}>立即备份</ButtonItem></PanelSectionRow>
       </PanelSection>
@@ -317,8 +338,6 @@ export default definePlugin(() => {
     userHome = context.home
     steamRoot = context.steam_root
     backupRoot = context.backup_root
-    const sid = new SteamID(App.m_CurrentUser.strSteamID)
-    await rpc("set_account_id", { id_num: sid.accountid })
   })()
   accountReady.catch(report)
   routerHook.addGlobalComponent("UmeYc-SteamBack-Saves", () => <SavesOverlay />)

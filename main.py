@@ -53,7 +53,12 @@ class Plugin:
 
     async def set_account_id(self, id_num: int):
         # logger.info(f'Setting account id { id_num }')
-        get_engine().add_account_id(id_num)
+        if not isinstance(id_num, int) or isinstance(id_num, bool) or not 0 < id_num < 2**32:
+            raise ValueError("Steam 账号尚未加载，请稍后点击刷新")
+        engine = get_engine()
+        # The Decky frontend identifies the current user; don't retain IDs from
+        # a previous login when the Steam account changes.
+        engine.account_ids = {id_num}
         return None  # Must return something to prevent assertion error logspam in JS
 
     """

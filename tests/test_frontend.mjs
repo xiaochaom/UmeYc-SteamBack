@@ -53,7 +53,7 @@ async function harness(options = {}) {
         case 'get_custom_games': return custom;
         case 'set_custom_game': custom = [{ ...args[0], paths: args[1] }]; return custom[0];
         case 'list_save_files': return { directory: '/home/deck/存档', parent: '/home/deck', entries: [{ name: 'slot.sav', path: '/home/deck/存档/slot.sav', directory: false }, { name: '子目录', path: '/home/deck/存档/子目录', directory: true }], truncated: false };
-        case 'find_supported': return [{ ...args[0][0], save_games_roots: { '/Steam/userdata/123/42/remote': '', '/home/deck/游戏存档': '_1' } }];
+        case 'find_supported': return [{ ...args[0][0], current_save_time: 1770000000000, save_games_roots: { '/Steam/userdata/123/42/remote': '', '/home/deck/游戏存档': '_1' } }];
         case 'get_saveinfos': return saves.map(s => ({ ...s }));
         case 'do_backup': return saves[0];
         case 'update_snapshot': { if (options.renameFails) throw Error('模拟保存失败'); const i = saves.findIndex(s => s.filename === args[0]); saves[i] = { ...saves[i], pinned: args[1], note: args[2], ...(args[3] === undefined ? {} : { name: args[3] }) }; return saves[i]; }
@@ -82,11 +82,15 @@ async function harness(options = {}) {
   }, { get: (object, key) => object[key] ?? key });
   const context = vm.createContext({
     console, SP_REACT: react, DFL: dfl,
+    setTimeout(fn) {
+      if (options.accountAfterWait) context.App.m_CurrentUser.strSteamID = options.accountAfterWait;
+      queueMicrotask(fn);
+    },
     window: { innerWidth: options.width || 854, innerHeight: 534, SP_REACT: react,
       SteamUIStore: { WindowStore: { GamepadUIMainWindowInstance: { MenuStore: menuStore } } },
       setInterval(fn) { timers.add(fn); return fn; }, clearInterval(fn) { timers.delete(fn); },
       __DECKY_SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED_deckyLoaderAPIInit: { connect: () => api } },
-    App: { m_CurrentUser: { strSteamID: '76561197960265851' } },
+    App: { m_CurrentUser: { strSteamID: options.steamID ?? '76561197960265851' } },
     SteamClient: {
       InstallFolder: { GetInstallFolders: async () => [{ strFolderPath: '/Steam', vecApps: [{ nAppID: 42, strAppName: '测试游戏' }] }] },
       Apps: { GetAllShortcuts: async () => [{ appid: -1, data: { strAppName: '非 Steam 游戏' } }] },
@@ -128,11 +132,41 @@ async function harness(options = {}) {
   }
   async function flush() { effects.splice(0).forEach(effect => effect()); await new Promise(resolve => setImmediate(resolve)); }
   return { render, find, nodes, calls, listener, running, manage, remount, flush, modal: () => modal, dialogs,
+    setSteamID(id) { context.App.m_CurrentUser.strSteamID = id; },
     async sideMenu(value) { if (value === 0) menuStore.CloseSideMenus(); else menu = value; timers.forEach(fn => fn()); await flush(); },
     async tick() { timers.forEach(fn => fn()); await flush(); },
     overlay: () => render(globalComponent()),
     button: (tree, label) => find(tree, 'ButtonItem', p => p.children.includes(label)) };
 }
+
+test('Steam 启动账号为零时等待真实账号，每次刷新重新注册账号', async () => {
+  const h = await harness({ steamID: '0', accountAfterWait: '76561197960265851' });
+  assert.equal(h.calls.find(c => c.method === 'set_account_id').args[0], 123);
+  assert.ok(h.calls.some(c => c.method === 'find_supported'));
+  // A backend restart must not rely on a previously resolved initialization.
+  await h.button(h.render(), '刷新').props.onClick();
+  assert.ok(h.calls.filter(c => c.method === 'set_account_id').length >= 2);
+  h.setSteamID('76561198404030766');
+  await h.button(h.render(), '刷新').props.onClick();
+  assert.equal(h.calls.filter(c => c.method === 'set_account_id').at(-1).args[0], 443765038);
+  h.manage();
+  await h.remount();
+  const registered = h.calls.filter(c => c.method === 'set_account_id').length;
+  await h.button(h.render(), '立即备份').props.onClick();
+  assert.equal(h.calls.filter(c => c.method === 'set_account_id').length, registered + 1);
+  assert.equal(h.calls.findLast(c => c.method === 'set_account_id').args[0], 443765038);
+  assert.ok(h.calls.some(c => c.method === 'do_backup'));
+});
+
+test('账号持续未就绪时不扫描错误目录，账号就绪后可以刷新恢复', async () => {
+  const h = await harness({ steamID: '0' });
+  assert.equal(h.calls.filter(c => c.method === 'set_account_id' || c.method === 'find_supported').length, 0);
+  assert.ok(h.nodes(h.render()).some(n => JSON.stringify(n.props?.children).includes('Steam 账号尚未加载')));
+  h.setSteamID('76561197960265851');
+  await h.button(h.render(), '刷新').props.onClick();
+  assert.equal(h.calls.find(c => c.method === 'set_account_id').args[0], 123);
+  assert.ok(h.calls.some(c => c.method === 'find_supported'));
+});
 
 test('首页仅刷新与游戏列表，点击游戏打开 Steam 原生存档弹窗，仅手动备份', async () => {
   const h = await harness();
@@ -253,7 +287,9 @@ test('管理页依次为选择路径、游戏路径、实际备份路径和逐�
     const path = nodes.findIndex(n => n.type === 'div' && n.props.children.some(c => typeof c === 'string' && c.includes('存档路径：')));
     const records = nodes.findIndex(n => n.type === 'DialogButton' && n.props['aria-label']?.startsWith('存档详情 '));
     const backupPath = nodes.findIndex(n => n.type === 'div' && n.props.children.includes('备份保存路径：\n/home/deck/homebrew/data/Steamback/saves2'));
-    assert.ok(choose >= 0 && path > choose && backupPath > path && records > backupPath);
+    const currentTime = nodes.findIndex(n => n.type === 'div' && n.props.children.some(c => typeof c === 'string' && c.startsWith('当前游戏存档时间：')));
+    assert.ok(choose >= 0 && path > choose && backupPath > path && currentTime > backupPath && records > currentTime);
+    assert.match(nodes[currentTime].props.children.join(''), /2026/);
     assert.ok(nodes.some(n => n.props?.children?.some(c => typeof c === 'string' && c.includes('删除存档只删除备份，不会删除游戏当前存档。'))));
     assert.equal(nodes[path].props.children.join(''), custom.length ? '自选存档路径：\n/home/deck/自选槽位.sav\n/run/media/存档' : '自动识别的存档路径：\n/Steam/userdata/123/42/remote\n/home/deck/游戏存档');
     h.render().props.onOK();

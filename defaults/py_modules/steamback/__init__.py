@@ -787,9 +787,14 @@ class Engine(CustomSaves):
             try:
                 custom = self._custom_plan(info)
                 if custom is not None:
+                    info["current_save_time"] = self._latest_save_time(custom, custom["custom_files"])
                     return any(custom["custom_files"].values())
                 # logger.debug(f'try_rcf { info }')
-                return self._read_rcf(info)
+                rcf = self._read_rcf(info)
+                if rcf:
+                    info["current_save_time"] = self._latest_save_time(
+                        info, {suffix: rcf for suffix in info["save_games_roots"].values()})
+                return rcf
             except FileNotFoundError:
                 logger.warning(
                     f'找不到云存档清单，请检查磁盘挂载：{info}')
@@ -807,6 +812,21 @@ class Engine(CustomSaves):
             info.pop("save_games_roots", None)
         supported = list(filter(try_rcf, candidates))
         return supported
+
+    def _latest_save_time(self, game_info: dict, files: dict):
+        """当前备份范围内普通存档文件的最新修改时间（毫秒），不使用目录或备份时间。"""
+        latest = None
+        for root, suffix in game_info["save_games_roots"].items():
+            for relative in files.get(suffix, []):
+                try:
+                    path = safe_file(root, relative)
+                    if path.is_file():
+                        modified = path.stat().st_mtime_ns // 1_000_000
+                        latest = modified if latest is None else max(latest, modified)
+                except (OSError, ValueError):
+                    # Steam/game writes can remove a file while scanning.
+                    continue
+        return latest
 
     """
     Given a list of directory names, return a list of directories that are actually mounted

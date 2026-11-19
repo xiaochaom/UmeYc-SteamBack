@@ -45,6 +45,40 @@ class Backups(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(result)
         return result
 
+    async def test_current_save_time_uses_latest_selected_file_not_backup_or_directory(self):
+        extra = self.root / "single.sav"
+        extra.write_text("slot")
+        os.utime(self.file, (1700000000, 1700000000))
+        os.utime(extra, (1700000100, 1700000100))
+        # Neither a directory's timestamp nor a symlink outside the selection
+        # is a game save timestamp.
+        outside = self.root / "outside.sav"
+        outside.write_text("unrelated")
+        (self.source / "link.sav").symlink_to(outside)
+        self.engine.set_custom_game(self.game, [str(self.source), str(extra)])
+        await self.engine.do_backup(self.game)
+        supported = await self.engine.find_supported([self.game])
+        self.assertEqual(supported[0]["current_save_time"], 1700000100000)
+        os.utime(self.file, (1700000200, 1700000200))
+        supported = await self.engine.find_supported([self.game])
+        self.assertEqual(supported[0]["current_save_time"], 1700000200000)
+
+    async def test_cloud_current_save_time_only_counts_cloud_listed_files(self):
+        self.engine.set_custom_game(self.game, [])
+        os.utime(self.file, (1700000000, 1700000000))
+        (self.source / "unrelated.log").write_text("newer but not a save")
+        cache = self.root / "cloud-cache"
+        cache.mkdir()
+        (cache / "remotecache.vdf").write_text(
+            f'"42"\n{{\n"{self.file.name}"\n{{\n"size" "9"\n}}\n}}\n')
+        with patch.object(self.engine, "_get_gamedir", return_value=[str(cache)]), \
+                patch.object(self.engine, "_find_save_games", return_value=[str(self.source)]):
+            supported = await self.engine.find_supported([self.game])
+        self.assertEqual(supported[0]["current_save_time"], 1700000000000)
+        self.file.unlink()
+        self.assertIsNone(self.engine._latest_save_time(
+            supported[0], {"": [self.file.name, "../outside.sav"]}))
+
     async def test_old_auto_setting_has_no_effect_and_manual_clicks_always_save(self):
         self.data.mkdir(exist_ok=True)
         (self.data / "enabled_games.json").write_text("[42]")
