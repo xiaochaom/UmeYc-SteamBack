@@ -110,4 +110,6 @@
 
 - 54 项 Python 测试、15 项前端宿主测试、TypeScript 检查、构建及开发 ZIP 打包通过。
 - 新增真实临时文件的云存档往返、校验失败不覆盖、版本冲突、撤销恢复、账号隔离、异步上传和嗅探变更候选测试；夸克 HTTP 层使用模拟响应，不接触真实网盘。
-- 开发包：`artifacts/UmeYc-SteamBack-1.4.0.zip`。用户说明 Deck 不在内网，本轮没有设备连接、安装或发布。后续实机清单见 [云同步说明](cloud-sync.md)。
+- 初始开发包：`artifacts/UmeYc-SteamBack-1.4.0.zip`。后续在 Deck 的 Python 3.14.6 临时目录复跑全部 54 项 Python 测试，通过；15 项前端宿主测试、TypeScript 检查、Rollup 构建和 ZIP CRC 校验通过。
+- 2026-11-19 将开发包安装到 `/home/deck/homebrew/plugins/UmeYc-SteamBack` 并重启 Decky Loader。运行日志确认 1.4.0 后端启动，运行数据目录仍为旧版兼容路径 `/home/deck/homebrew/data/Steamback`，没有改动备份目录。未创建版本标签或发布 Release。
+- 真实夸克接口探测确认扫码 token 接口返回 `status=2000000` 且含 token，轮询接口在未扫码时返回 `50004001`（等待中）。尚未扫码验证登录换会话、Cookie 持久化、网盘上传/下载和自动上传。下一步由用户在 Deck 上打开登录弹窗并使用夸克 App 扫码，然后用独立测试存档完成双向同步；不得对真实游戏存档做覆盖测试。详见 [云同步说明](cloud-sync.md)。
