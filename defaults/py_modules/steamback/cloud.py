@@ -1,4 +1,4 @@
-"""可移植的云存档版本；只在完整上传 ZIP 后发布索引，不删除历史版本。"""
+"""可移植的云存档版本；完整发布后只保留最新一份云端存档。"""
 import asyncio
 import copy
 import hashlib
@@ -20,6 +20,7 @@ from .quark import QuarkClient, QuarkError, LoginExpired
 MAX_BYTES = 2 * 1024**3
 MAX_FILES = 50000
 COMMIT = re.compile(r"version-\d{13}-[a-f0-9]{32}\.json")
+ARCHIVE = re.compile(r"version-\d{13}-[a-f0-9]{32}\.zip")
 
 
 class CloudConflict(ValueError):
@@ -288,6 +289,68 @@ class CloudService:
         state.setdefault(self.key(account, game), {})["synced_hash"] = content_hash
         write_json(self.state_path, state)
 
+    def _prune_versions(self, account, game, folder, before, retained):
+        """只清理同步前已存在的旧文件，保护其他设备正在上传的新文件。"""
+        warning = "存档已同步，但旧云存档暂未清理完成，下次上传时会重试"
+        try:
+            latest = self.latest(account, game)
+            if not latest or latest["revision"] != retained["revision"]:
+                return "云端版本已变化，已跳过旧版本清理，请刷新后重试"
+            listed = self.client.list_files(folder)
+            # The retained index must point to a complete archive in this folder.
+            # Never delete an old version if the new pair isn't actually visible.
+            if not any(f["fid"] == retained["archive_fid"] and f["file_name"] == retained["archive_name"]
+                       and not QuarkClient.is_directory(f) and int(f.get("size", 0)) > 0 for f in listed):
+                return warning
+            baseline = {f["fid"]: f for f in before if not QuarkClient.is_directory(f)}
+            old_commits = {f["fid"]: f for f in listed
+                           if f["fid"] in baseline and f["file_name"] == baseline[f["fid"]]["file_name"]
+                           and COMMIT.fullmatch(f["file_name"]) and f["fid"] != retained["revision"]}
+            old_stems = {f["file_name"].removesuffix(".json") for f in old_commits.values()}
+
+            def remove(files):
+                ids = list(files)
+                for offset in range(0, len(ids), 100):
+                    current = self.latest(account, game)
+                    if not current or current["revision"] != retained["revision"]:
+                        raise ValueError("云端版本已变化")
+                    batch = ids[offset:offset + 100]
+                    self.client.delete_files(batch)
+                    for attempt in range(6):
+                        visible = {f["fid"] for f in self.client.list_files(folder)}
+                        if not visible.intersection(batch):
+                            break
+                        if attempt < 5:
+                            time.sleep(1)
+                    else:
+                        raise ValueError("夸克尚未确认旧版本删除完成")
+
+            # Remove obsolete indexes before their archives. If deletion fails,
+            # leave those archives in place and retry on the next upload.
+            remove(old_commits)
+            listed = self.client.list_files(folder)
+            live_stems = {f["file_name"].removesuffix(".json") for f in listed if COMMIT.fullmatch(f["file_name"])}
+            archives = {}
+            for f in listed:
+                if f["fid"] not in baseline or f["file_name"] != baseline[f["fid"]]["file_name"] or QuarkClient.is_directory(f):
+                    continue
+                if not ARCHIVE.fullmatch(f["file_name"]) or f["fid"] == retained["archive_fid"]:
+                    continue
+                stem = f["file_name"].removesuffix(".zip")
+                if stem == retained["archive_name"].removesuffix(".zip") or stem in live_stems:
+                    continue
+                # Orphans may belong to another device in the middle of upload.
+                # Only reap those older than a day using server time, not names.
+                created = int(f.get("created_at", 0))
+                created_ms = created * 1000 if 0 < created < 10**12 else created
+                stale = 0 < created_ms < int(time.time() * 1000) - 24 * 3600 * 1000
+                if stem in old_stems or stale:
+                    archives[f["fid"]] = f
+            remove(archives)
+            return None
+        except (ValueError, OSError, KeyError, TypeError):
+            return warning
+
     def upload(self, account, game, expected_revision=None, expected_uid=None):
         with self.lock:
             auth = self.client.account(); self.uid = auth["user_id"]
@@ -302,15 +365,17 @@ class CloudService:
                 archive = Path(temp) / "save.zip"
                 manifest = pack_current(engine, game, archive)
                 remote = self.latest(account, game)
+                folder = self.directory(account, game, create=True)
+                before = self.client.list_files(folder)
                 if remote and remote["content_hash"] == manifest["content_hash"]:
                     self.remember(account, game, manifest["content_hash"])
-                    return {"message": "本地与云端存档内容一致，无需重复上传"}
+                    warning = self._prune_versions(account, game, folder, before, remote)
+                    return {"message": warning or "本地与云端存档内容一致，无需重复上传；云端仅保留最新一份"}
                 previous = self.read_state().get(self.key(account, game), {}).get("synced_hash")
                 if remote and remote["content_hash"] != previous and expected_revision != remote["revision"]:
                     raise CloudConflict(remote)
                 if expected_revision is not None and (remote or {}).get("revision") != expected_revision:
                     raise CloudConflict(remote or {"revision": None, "save_time": None})
-                folder = self.directory(account, game, create=True)
                 stem = f"version-{int(time.time() * 1000):013d}-{uuid.uuid4().hex}"
                 entry = self.client.upload(archive, folder, stem + ".zip")
                 # Another device may have published while this one was uploading.
@@ -324,9 +389,11 @@ class CloudService:
                           "content_hash": manifest["content_hash"], "save_time": manifest["save_time"], "uploaded_at": int(time.time()*1000)}
                 p = Path(temp) / "version.json"
                 p.write_text(json.dumps(record), encoding="utf-8")
-                self.client.upload(p, folder, stem + ".json")
+                published = self.client.upload(p, folder, stem + ".json")
                 self.remember(account, game, manifest["content_hash"])
-                return {"message": "本地存档已上传，旧云端版本保留"}
+                record["revision"] = published["fid"]
+                warning = self._prune_versions(account, game, folder, before, record)
+                return {"message": warning or "本地存档已上传，云端仅保留最新一份"}
 
     async def download(self, account, game, expected_revision, expected_uid=None):
         # Called in a worker thread with its own event loop; engine I/O is local.

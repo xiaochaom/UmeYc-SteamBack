@@ -136,3 +136,14 @@ class QuarkProtocol(unittest.TestCase):
         self.assertIn('<ETag>checksum</ETag>', requests[1][2].decode())
         self.assertEqual(api.call_count, 2)
         self.assertIn('x-oss-callback:', api.call_args.kwargs['payload']['auth_meta'])
+
+    def test_delete_only_explicit_ids_and_never_clear_recycle_bin(self):
+        with patch.object(self.client, '_json', return_value={'status': 200}) as api:
+            self.client.delete_files(['old-index', 'old-archive'])
+            api.assert_called_once_with('POST', self.client.DRIVE, '/1/clouddrive/file/delete', payload={
+                'action_type': 2, 'filelist': ['old-index', 'old-archive'], 'exclude_fids': []})
+            with self.assertRaises(ValueError):
+                self.client.delete_files([])
+            with self.assertRaises(ValueError):
+                self.client.delete_files(list(range(101)))
+            self.assertEqual(api.call_count, 1)

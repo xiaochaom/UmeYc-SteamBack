@@ -24,6 +24,13 @@ class MemoryQuark:
         self.payloads = {}
         self.fail_commit = False
         self.expired = False
+        self.sequence = 0
+        self.deleted = []
+        self.fail_delete = False
+
+    def next_id(self):
+        self.sequence += 1
+        return str(self.sequence)
 
     def account(self):
         if self.expired:
@@ -38,7 +45,7 @@ class MemoryQuark:
         if match:
             return match["fid"]
         if create:
-            fid = str(len(self.items) + 1)
+            fid = self.next_id()
             self.items[fid] = {"fid": fid, "parent": parent, "file_name": name, "dir": True}
             return fid
         return None
@@ -46,11 +53,19 @@ class MemoryQuark:
     def upload(self, source, folder, name):
         if self.fail_commit and name.endswith('.json'):
             raise QuarkError("模拟网络失败")
-        fid = str(len(self.items) + 1)
+        fid = self.next_id()
         data = Path(source).read_bytes()
-        self.items[fid] = {"fid": fid, "parent": folder, "file_name": name, "size": len(data), "created_at": len(self.items) + 1}
+        self.items[fid] = {"fid": fid, "parent": folder, "file_name": name, "size": len(data), "created_at": self.sequence}
         self.payloads[fid] = data
         return self.items[fid]
+
+    def delete_files(self, file_ids):
+        if self.fail_delete:
+            raise QuarkError("模拟删除失败")
+        self.deleted.extend(file_ids)
+        for fid in file_ids:
+            self.items.pop(fid, None)
+            self.payloads.pop(fid, None)
 
     def download(self, fid, destination, limit=None):
         data = self.payloads[fid]
@@ -137,14 +152,26 @@ class CloudSync(unittest.IsolatedAsyncioTestCase):
             with ZipFile(archive) as z:
                 self.assertNotIn(str(self.source), z.read('manifest.json').decode())
 
-    async def test_unchanged_upload_is_idempotent_but_changed_saves_keep_versions(self):
+    async def test_unchanged_upload_is_idempotent_and_changed_saves_keep_only_latest(self):
         await self.upload(); count = len(self.client.items)
+        old = self.service.latest(123, self.game)
         result = await self.upload()
         self.assertIn('一致', result['message']); self.assertEqual(len(self.client.items), count)
         self.slot.write_bytes(b'next')
         await self.upload()
         commits = [i for i in self.client.items.values() if i['file_name'].endswith('.json')]
-        self.assertEqual(len(commits), 2)
+        self.assertEqual(len(commits), 1)
+        self.assertEqual(len([i for i in self.client.items.values() if i['file_name'].endswith('.zip')]), 1)
+        self.assertNotIn(old['revision'], self.client.items)
+        self.assertNotIn(old['archive_fid'], self.client.items)
+        self.assertLess(self.client.deleted.index(old['revision']), self.client.deleted.index(old['archive_fid']))
+        self.assertIn('最新一份', (await self.upload())['message'])
+        current = self.service.latest(123, self.game)
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp)/'latest.zip'
+            self.client.download(current['archive_fid'], archive)
+            manifest = unpack_verified(archive, Path(tmp)/'files', self.game, 123, current['content_hash'])
+            self.assertEqual((Path(tmp)/'files/0/slot.sav').read_bytes(), b'next')
 
     async def test_other_device_changes_require_explicit_revision_confirmation(self):
         await self.upload()
@@ -170,6 +197,7 @@ class CloudSync(unittest.IsolatedAsyncioTestCase):
             await self.upload()
         self.assertEqual(self.service.latest(123, self.game)['revision'], old['revision'])
         self.assertEqual(self.slot.read_bytes(), b'new data')
+        self.assertEqual(self.client.deleted, [])
 
     async def test_bad_archive_cannot_write_live_files(self):
         await self.upload(); remote = self.service.latest(123, self.game)
@@ -286,3 +314,89 @@ class CloudSync(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status['activity']['id'], job['id'])
         self.assertEqual(status['activity']['state'], 'running')
         await asyncio.gather(*self.service.tasks)
+
+    async def test_same_content_upload_cleans_legacy_history_and_is_scoped(self):
+        # Build history using the old retention behavior, then exercise migration.
+        with patch.object(self.service, '_prune_versions', return_value=None):
+            await self.upload()
+            self.slot.write_bytes(b'newest'); await self.upload()
+        folder = self.service.directory(123, self.game)
+        tmp = self.root/'unrelated'; tmp.write_bytes(b'keep')
+        unrelated = self.client.upload(tmp, folder, 'my-notes.zip')['fid']
+        other_folder = self.service.directory(124, self.game, create=True)
+        other = self.client.upload(tmp, other_folder, 'version-1700000000000-' + 'a'*32 + '.zip')['fid']
+        same_name_dir = self.client.folder(folder, 'version-1700000000000-' + 'b'*32 + '.zip', create=True)
+        await self.upload()
+        names = [f['file_name'] for f in self.client.list_files(folder) if not f.get('dir')]
+        self.assertEqual(sum(n.endswith('.json') for n in names), 1)
+        self.assertEqual(sum(n.startswith('version-') and n.endswith('.zip') for n in names), 1)
+        self.assertTrue(all(fid in self.client.items for fid in [unrelated, other, same_name_dir]))
+
+    async def test_cleanup_failure_keeps_latest_downloadable_and_retries_on_next_upload(self):
+        await self.upload()
+        self.slot.write_bytes(b'new data')
+        self.client.fail_delete = True
+        result = await self.upload()
+        self.assertIn('清理', result['message'])
+        remote = self.service.latest(123, self.game)
+        self.assertIn(remote['archive_fid'], self.client.payloads)
+        self.client.fail_delete = False
+        await self.upload()
+        self.assertEqual(len([f for f in self.client.items.values() if f['file_name'].endswith('.json')]), 1)
+        self.assertEqual(len([f for f in self.client.items.values() if f['file_name'].endswith('.zip')]), 1)
+        self.assertIn(remote['archive_fid'], self.client.items)
+
+    async def test_missing_new_archive_or_concurrent_new_revision_prevents_cleanup(self):
+        with patch.object(self.service, '_prune_versions', return_value=None):
+            await self.upload()
+            self.slot.write_bytes(b'new data'); await self.upload()
+        current = self.service.latest(123, self.game)
+        folder = self.service.directory(123, self.game)
+        before = self.client.list_files(folder)
+        broken = dict(current, archive_fid='missing')
+        self.assertIsNotNone(self.service._prune_versions(123, self.game, folder, before, broken))
+        self.assertEqual(self.client.deleted, [])
+        old = next(f for f in before if f['file_name'].endswith('.json') and f['fid'] != current['revision'])
+        stale = dict(current, revision=old['fid'])
+        self.assertIsNotNone(self.service._prune_versions(123, self.game, folder, before, stale))
+        self.assertEqual(self.client.deleted, [])
+
+    async def test_unconfirmed_index_deletion_never_deletes_its_archive(self):
+        await self.upload()
+        old = self.service.latest(123, self.game)
+        self.slot.write_bytes(b'new data')
+        # Quark may accept a delete request before its background task completes.
+        with patch.object(self.client, 'delete_files', return_value=None) as delete, \
+             patch('steamback.cloud.time.sleep'):
+            result = await self.upload()
+        self.assertIn('清理', result['message'])
+        delete.assert_called_once_with([old['revision']])
+        self.assertIn(old['archive_fid'], self.client.payloads)
+        current = self.service.latest(123, self.game)
+        self.assertNotEqual(current['revision'], old['revision'])
+        await self.upload()
+        self.assertNotIn(old['archive_fid'], self.client.items)
+        self.assertIn(current['archive_fid'], self.client.items)
+
+    async def test_recent_inflight_archives_protected_but_stale_orphans_reaped(self):
+        import time
+        await self.upload()
+        folder = self.service.directory(123, self.game)
+        src = self.root/'orphan.zip'; src.write_bytes(b'inflight')
+        recent = self.client.upload(src, folder, 'version-1700000000000-'+'a'*32+'.zip')
+        recent['created_at'] = int(time.time()*1000)
+        stale = self.client.upload(src, folder, 'version-1700000000000-'+'b'*32+'.zip')
+        stale['created_at'] = int(time.time()) - 2*24*3600
+        await self.upload()
+        self.assertIn(recent['fid'], self.client.items)
+        self.assertNotIn(stale['fid'], self.client.items)
+
+    async def test_files_created_after_upload_snapshot_are_not_pruned(self):
+        await self.upload()
+        folder = self.service.directory(123, self.game)
+        before = self.client.list_files(folder)
+        current = self.service.latest(123, self.game)
+        src = self.root/'pending'; src.write_bytes(b'pending')
+        newer = self.client.upload(src, folder, 'version-1700000000000-'+'c'*32+'.zip')
+        self.service._prune_versions(123, self.game, folder, before, current)
+        self.assertIn(newer['fid'], self.client.items)

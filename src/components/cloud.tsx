@@ -146,7 +146,7 @@ export const CloudGame: FC<{ game: CloudGameInfo; localTime?: number | null; ava
     }}>刷新云端状态</DialogButton>
     {job && <div role="status" style={textStyle}>{job.message}</div>}
     {job?.state === 'conflict' && <DialogButton disabled={working} onClick={() => showDialog(
-      <ConfirmModal strTitle="确认上传不同版本" strDescription={`本地存档：${timeText(localTime)}\n云端存档：${timeText(job.cloud_time)}\n继续后将以本地版本作为最新云存档，旧云端版本保留。`}
+      <ConfirmModal strTitle="确认上传不同版本" strDescription={`本地存档：${timeText(localTime)}\n云端存档：${timeText(job.cloud_time)}\n继续后将以本地版本作为最新云存档，上传成功后删除旧云端版本，只保留最新一份。`}
         strOKButtonText="继续上传" strCancelButtonText="取消" onOK={() => start('upload', job.revision)} />
     )}>确认使用本地版本</DialogButton>}
     {(error || state?.error) && <div role="alert" style={textStyle}>{error || state?.error}</div>}

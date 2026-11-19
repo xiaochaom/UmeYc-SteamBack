@@ -239,6 +239,13 @@ class QuarkClient:
     def is_directory(entry):
         return entry.get("dir") is True or entry.get("file_type") == 0
 
+    def delete_files(self, file_ids):
+        """仅删除调用方明确指定的文件，不清空目录或账号回收站。"""
+        if not file_ids or len(file_ids) > 100:
+            raise ValueError("云端删除文件数量无效")
+        return self._json("POST", self.DRIVE, "/1/clouddrive/file/delete", payload={
+            "action_type": 2, "filelist": list(file_ids), "exclude_fids": []})
+
     def folder(self, parent, name, create=False):
         matches = [f for f in self.list_files(parent) if f["file_name"] == name]
         if matches:
