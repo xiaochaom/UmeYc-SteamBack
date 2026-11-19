@@ -17,6 +17,9 @@ async function harness(options = {}) {
   const timers = new Set();
   const dialogs = [];
   let menu = 2;
+  let cloudAuth = options.cloudAuth || { logged_in: false, user_id: null };
+  let cloudAuto = false;
+  let cloudJob = null;
   const menuStore = { GetOpenSideMenu: () => menu, CloseSideMenus() { menu = 0; } };
   const running = [];
   let saves = options.saves || [{ filename: 'save_42_1770000000000', timestamp: 1770000000000,
@@ -37,7 +40,15 @@ async function harness(options = {}) {
         state.values[index] = typeof value === 'function' ? value(state.values[index]) : value;
       }];
     },
-    useEffect(effect) { if (!current.mounted) effects.push(effect); },
+    useEffect(effect, deps) {
+      const index = cursor++, state = current;
+      state.hooks ||= {};
+      const previous = state.hooks[index];
+      if (!previous || !deps || deps.some((value, i) => value !== previous.deps[i])) {
+        state.hooks[index] = { deps };
+        effects.push(() => { previous?.cleanup?.(); state.hooks[index].cleanup = effect(); });
+      }
+    },
   };
   const api = {
     _version: 2,
@@ -49,6 +60,21 @@ async function harness(options = {}) {
       switch (method) {
         case 'get_path_context': return { home: '/home/deck', steam_root: '/Steam', backup_root: '/home/deck/homebrew/data/Steamback/saves2' };
         case 'set_account_id': return null;
+        case 'sync_running_games': return null;
+        case 'game_lifetime': return null;
+        case 'quark_account': return cloudAuth;
+        case 'quark_login_start': return { session_id: 'qr-session', url: 'https://su.quark.cn/test?token=sample' };
+        case 'quark_login_poll': cloudAuth = { logged_in: true, user_id: 'quark123' }; return { state: 'logged_in', ...cloudAuth };
+        case 'quark_login_cancel': return null;
+        case 'quark_logout': cloudAuth = { logged_in: false, user_id: null }; return cloudAuth;
+        case 'cloud_status': return { ...cloudAuth, auto_upload: cloudAuto, cloud_time: 1770000000000, uploaded_at: 1770000005000, revision: 'cloud-rev', activity: cloudJob };
+        case 'cloud_set_auto': cloudAuto = args[1]; return cloudAuto;
+        case 'cloud_start': cloudJob = { id: 'job1', state: 'running', message: '正在同步…' }; return cloudJob;
+        case 'cloud_job': return cloudJob;
+        case 'sniff_status': return { state: 'idle' };
+        case 'sniff_start': return { state: 'watching', message: '请保存进度后退出游戏' };
+        case 'sniff_finish': return { state: 'ready', candidates: [{ path: '/home/deck/game/slot.sav', size: 2048, modified: 1770000000000 }] };
+        case 'sniff_cancel': return { state: 'idle' };
         case 'find_mounted': return ['/Steam'];
         case 'get_custom_games': return custom;
         case 'set_custom_game': custom = [{ ...args[0], paths: args[1] }]; return custom[0];
@@ -81,7 +107,7 @@ async function harness(options = {}) {
     },
   }, { get: (object, key) => object[key] ?? key });
   const context = vm.createContext({
-    console, SP_REACT: react, DFL: dfl,
+    console, TextEncoder, SP_REACT: react, DFL: dfl,
     setTimeout(fn) {
       if (options.accountAfterWait) context.App.m_CurrentUser.strSteamID = options.accountAfterWait;
       queueMicrotask(fn);
@@ -132,6 +158,10 @@ async function harness(options = {}) {
   }
   async function flush() { effects.splice(0).forEach(effect => effect()); await new Promise(resolve => setImmediate(resolve)); }
   return { render, find, nodes, calls, listener, running, manage, remount, flush, modal: () => modal, dialogs,
+    plugin,
+    sniffType() { return vm.runInContext('SniffDialog', context); },
+    child(name, tree = render()) { return nodes(tree).find(n => typeof n.type === 'function' && n.type.name === name); },
+    completeJob(value) { cloudJob = { id: 'job1', ...value }; },
     setSteamID(id) { context.App.m_CurrentUser.strSteamID = id; },
     async sideMenu(value) { if (value === 0) menuStore.CloseSideMenus(); else menu = value; timers.forEach(fn => fn()); await flush(); },
     async tick() { timers.forEach(fn => fn()); await flush(); },
@@ -339,4 +369,91 @@ test('游戏管理使用原生 ModalRoot，路径与列表置于可滚动区域�
   h.render().props.onOK();
   assert.equal(manager.closed, true);
   assert.equal(h.overlay(), null);
+});
+
+test('夸克首页未登录扫码、登录后显示 ID，退出只清本机状态', async () => {
+  const h = await harness();
+  const account = h.child('CloudAccount'); assert.ok(account);
+  let tree = h.render(account); await h.flush(); tree = h.render(account);
+  h.button(tree, '登录夸克').props.onClick();
+  const qr = h.modal();
+  h.render(qr); await h.flush();
+  tree = h.render(qr);
+  const image = h.find(tree, 'img', p => p.alt === '夸克登录二维码');
+  assert.ok(image.props.src.startsWith('data:image/svg+xml;'));
+  assert.ok(decodeURIComponent(image.props.src).includes('<svg'));
+  await h.tick(); await h.flush();
+  assert.ok(h.calls.some(c => c.method === 'quark_login_poll'));
+  tree = h.render(account);
+  h.button(tree, '夸克用户 ID：quark123').props.onClick();
+  const confirm = h.modal();
+  assert.match(confirm.props.strDescription, /网盘存档保留/);
+  await confirm.props.onOK();
+  assert.ok(h.button(h.render(account), '登录夸克'));
+});
+
+test('云同步默认关闭，上传后台执行，下载明确确认且运行时禁止覆盖', async () => {
+  const h = await harness({ cloudAuth: { logged_in: true, user_id: 'quark123' } });
+  h.manage(); await h.flush();
+  const cloud = h.child('CloudGame'); assert.ok(cloud);
+  h.render(cloud); await h.flush();
+  let tree = h.render(cloud);
+  let toggle = h.find(tree, 'ToggleField', p => p.label === '游戏关闭时自动上传云存档');
+  assert.equal(toggle.props.checked, false);
+  assert.ok(h.nodes(tree).some(n => n.props?.children?.some(c => typeof c === 'string' && c.includes('云端存档时间：'))));
+  await toggle.props.onChange(true);
+  assert.equal(h.calls.findLast(c => c.method === 'cloud_set_auto').args[1], true);
+  tree = h.render(cloud);
+  await h.find(tree, 'DialogButton', p => p.children.includes('本地同步到云端')).props.onClick();
+  assert.equal(h.calls.findLast(c => c.method === 'cloud_start').args[1], 'upload');
+  tree = h.render(cloud); await h.flush();
+  assert.equal(h.find(tree, 'DialogButton', p => p.children.includes('云端同步到本地')).props.disabled, true);
+  h.completeJob({ state: 'done', message: '上传完成' }); await h.tick(); await h.flush();
+  tree = h.render(cloud);
+  h.find(tree, 'DialogButton', p => p.children.includes('云端同步到本地')).props.onClick();
+  const confirmation = h.modal();
+  assert.match(confirmation.props.strDescription, /本地存档.*云端存档.*撤销备份/s);
+  assert.equal(h.calls.filter(c => c.method === 'cloud_start').length, 1);
+  h.running.push({ appid: '42' });
+  await confirmation.props.onOK();
+  assert.equal(h.calls.filter(c => c.method === 'cloud_start').length, 1);
+  h.running.length = 0;
+  await confirmation.props.onOK();
+  assert.equal(h.calls.findLast(c => c.method === 'cloud_start').args[1], 'download');
+  assert.equal(h.calls.findLast(c => c.method === 'cloud_start').args[2], 'cloud-rev');
+});
+
+test('插件关闭页面后仍观察游戏退出，卸载时停止观察', async () => {
+  const h = await harness();
+  h.running.push({ appid: '42' }); await h.tick();
+  assert.ok(h.calls.some(c => c.method === 'game_lifetime' && c.args[0] === 42 && c.args[1] === true));
+  await h.sideMenu(0);
+  h.running.length = 0; await h.tick();
+  assert.equal(h.calls.filter(c => c.method === 'game_lifetime' && c.args[1] === false).length, 1);
+  await h.tick();
+  assert.equal(h.calls.filter(c => c.method === 'game_lifetime' && c.args[1] === false).length, 1);
+  h.plugin.onDismount();
+  const count = h.calls.filter(c => c.method === 'game_lifetime').length;
+  h.running.push({ appid: '42' }); await h.tick();
+  assert.equal(h.calls.filter(c => c.method === 'game_lifetime').length, count);
+});
+
+test('嗅探先记录基线，再展示变更候选，用户确认前不会配置路径', async () => {
+  const h = await harness(); h.manage(); await h.flush();
+  // Open the actual component through a no-path game's management button.
+  const cloud = h.child('CloudGame');
+  const SniffDialog = h.sniffType();
+  const dialog = { type: SniffDialog, props: { game: cloud.props.game, prepare: cloud.props.prepare, onChanged: cloud.props.onChanged, closeModal() {} } };
+  h.render(dialog); await h.flush();
+  let tree = h.render(dialog);
+  await h.find(tree, 'DialogButton', p => p.children.includes('开始查找')).props.onClick();
+  assert.equal(h.calls.filter(c => c.method === 'set_custom_game').length, 0);
+  tree = h.render(dialog);
+  await h.find(tree, 'DialogButton', p => p.children.includes('完成查找')).props.onClick();
+  tree = h.render(dialog);
+  const candidate = h.find(tree, 'DialogButton', p => h.nodes({ props: p }).some(n => n.props?.children?.includes('/home/deck/game/slot.sav')));
+  assert.ok(candidate); candidate.props.onClick();
+  tree = h.render(dialog);
+  await h.find(tree, 'DialogButton', p => p.children.includes('使用所选存档')).props.onClick();
+  assert.deepEqual(Array.from(h.calls.findLast(c => c.method === 'set_custom_game').args[1]), ['/home/deck/game/slot.sav']);
 });

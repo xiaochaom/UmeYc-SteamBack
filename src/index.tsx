@@ -9,6 +9,7 @@ import { FiDownload } from "react-icons/fi"
 import SteamID from "steamid"
 import { PanelDialog } from "./components/panel-dialog"
 import { SavePaths, PathDraft } from "./components/save-paths"
+import { CloudAccount, CloudGame, SniffDialog } from "./components/cloud"
 
 interface GameInfo {
   game_id: number
@@ -88,6 +89,7 @@ async function ensureAccount() {
       const sid = new SteamID(raw)
       if (sid.isValidIndividual()) {
         await rpc("set_account_id", { id_num: sid.accountid })
+        await call<[number[]], void>("sync_running_games", Router.RunningApps.map(a => Number(a.appid)))
         return
       }
     }
@@ -271,18 +273,25 @@ const Content: FC<{ side?: boolean }> = ({ side = false }) => {
           <div style={pathStyle}>{pathText(selectedGame)}</div>
           <div style={pathStyle}>{`备份保存路径：\n${backupRoot}`}</div>
           <div style={pathStyle}>{`当前游戏存档时间：${currentSaveTime == null ? "未找到存档文件" : dateText(currentSaveTime)}`}</div>
+          <CloudGame key={selectedGame.game_id} game={selectedGame} localTime={currentSaveTime} available={available}
+            hasPath={available || !!custom.find(g => g.game_id === selectedGame.game_id)?.paths?.length}
+            showDialog={showSaveDialog} prepare={ensureAccount} onChanged={refresh} />
+          {!available && <DialogButton disabled={busy} style={{ width: "100%", marginTop: 8 }} onClick={() => showSaveDialog(
+            <SniffDialog game={selectedGame} prepare={ensureAccount} onChanged={refresh} />
+          )}>查找存档位置</DialogButton>}
         </PanelSectionRow>
         <PanelSectionRow><ButtonItem layout="below" disabled={busy || !available} onClick={() => action(() => backup(selectedGame))}>立即备份</ButtonItem></PanelSectionRow>
       </PanelSection>
       <PanelSection title={`选择并管理存档（${gameSaves.length}）`}>
         {gameSaves.length ? gameSaves.map(snapshot) : <p style={{ padding: "0 16px" }}>暂无备份。选择存档路径后，点击“立即备份”保存第一份。</p>}
       </PanelSection>
-      <p style={{ padding: "0 16px", fontSize: 12, opacity: 0.7 }}>全部手动备份，所有记录持续保留。删除存档只删除备份，不会删除游戏当前存档。</p>
+      <p style={{ padding: "0 16px", fontSize: 12, opacity: 0.7 }}>本地备份手动保存，所有记录持续保留。删除存档只删除备份，不会删除游戏当前存档。</p>
     </PanelDialog>
   }
   if (side) return null
   return <div>
     <PanelSection>
+      <PanelSectionRow><CloudAccount showDialog={showSaveDialog} /></PanelSectionRow>
       <PanelSectionRow><ButtonItem layout="below" disabled={busy || loading} onClick={() => action(refresh)}>刷新</ButtonItem></PanelSectionRow>
     </PanelSection>
     {error && <p role="alert" style={{ padding: "0 16px", color: "#ffaaaa" }}>加载失败：{error}</p>}
@@ -340,6 +349,36 @@ export default definePlugin(() => {
     backupRoot = context.backup_root
   })()
   accountReady.catch(report)
+  // This observer lives for the plugin's entire lifetime, including while the
+  // QAM and all plugin modals are closed. Ignore apps already stopped at load.
+  let disposed = false, scanning = false
+  let observed = new Set(Router.RunningApps.map(a => Number(a.appid)))
+  let observedAccount = ""
+  const observeGames = async () => {
+    if (disposed || scanning) return
+    scanning = true
+    try {
+      await accountReady
+      const raw = App.m_CurrentUser?.strSteamID || "0"
+      const sid = new SteamID(raw)
+      if (!sid.isValidIndividual()) return
+      const next = new Set(Router.RunningApps.map(a => Number(a.appid)))
+      await rpc("set_account_id", { id_num: sid.accountid })
+      if (observedAccount !== raw) {
+        observedAccount = raw
+        observed = next
+        await call<[number[]], void>("sync_running_games", [...next])
+        return
+      }
+      // Notify exits before the next full running snapshot can discard them.
+      for (const id of observed) if (!next.has(id)) await call<[number, boolean], void>("game_lifetime", id, false)
+      for (const id of next) if (!observed.has(id)) await call<[number, boolean], void>("game_lifetime", id, true)
+      observed = next
+    } catch (e) { report(e) }
+    finally { scanning = false }
+  }
+  void observeGames()
+  const gameTimer = window.setInterval(() => { void observeGames() }, 2000)
   routerHook.addGlobalComponent("UmeYc-SteamBack-Saves", () => <SavesOverlay />)
   return {
     name: "UmeYc-SteamBack",
@@ -347,6 +386,8 @@ export default definePlugin(() => {
     content: <Content />,
     icon: <FiDownload />,
     onDismount() {
+      disposed = true
+      window.clearInterval(gameTimer)
       closeSavePages()
       routerHook.removeGlobalComponent("UmeYc-SteamBack-Saves")
     }
