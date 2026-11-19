@@ -40,8 +40,9 @@ class QuarkProtocol(unittest.TestCase):
             if path == '/account/info':
                 if params:
                     self.assertEqual(params['st'], 'private-ticket')
-                    self.cookie('__pus', 'secret-cookie'); self.cookie('__uid', 'user123')
-                return {'data': {'uid': 'user123'}}
+                    self.cookie('__puus', 'secret-cookie'); self.cookie('__uid', 'user123')
+                    return {'success': True, 'code': 'OK', 'data': {}}
+                return {'success': True, 'code': 'OK', 'data': {'avatarUri': 'avatar', 'nickname': 'tester'}}
             raise AssertionError(path)
         with patch.object(self.client, '_json', side_effect=protocol):
             qr = self.client.begin_login()
@@ -81,6 +82,11 @@ class QuarkProtocol(unittest.TestCase):
                 self.client._json('GET', self.client.PAN, '/account/info')
             self.assertNotIn('secret', str(error.exception))
         with patch.object(self.client, '_open', return_value=Response({'status': 200, 'data': {'uid': 'x'}})):
+            self.assertEqual(self.client._json('GET', self.client.PAN, '/account/info')['data']['uid'], 'x')
+
+    def test_quark_account_success_envelope_accepts_ok_code(self):
+        with patch.object(self.client, '_open', return_value=Response(
+                {'success': True, 'data': {'uid': 'x'}, 'code': 'OK'})):
             self.assertEqual(self.client._json('GET', self.client.PAN, '/account/info')['data']['uid'], 'x')
 
     def test_download_domain_and_size_validation(self):

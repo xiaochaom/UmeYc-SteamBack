@@ -4,13 +4,15 @@ from datetime import datetime, timezone
 import hashlib
 import http.cookiejar
 import json
+import logging
 import os
 from pathlib import Path
+import ssl
 import tempfile
 import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit, quote
-from urllib.request import Request, build_opener, HTTPCookieProcessor, HTTPRedirectHandler
+from urllib.request import Request, build_opener, HTTPCookieProcessor, HTTPRedirectHandler, HTTPSHandler
 import uuid
 from xml.sax.saxutils import escape
 
@@ -38,6 +40,9 @@ class QuarkClient:
     DRIVE = "https://drive-pc.quark.cn"
     UOP = "https://uop.quark.cn"
     MAX_TRANSFER = 2 * 1024**3
+    AUTH_COOKIE_NAMES = ("__pus", "__puus", "__kps", "__uid")
+    CA_BUNDLES = ("/etc/ssl/certs/ca-certificates.crt", "/etc/ssl/cert.pem",
+                  "/etc/pki/tls/certs/ca-bundle.crt")
 
     def __init__(self, data_dir):
         self.directory = Path(data_dir) / "quark"
@@ -49,8 +54,10 @@ class QuarkClient:
                 self.jar.load(ignore_discard=True, ignore_expires=False)
             except (OSError, http.cookiejar.LoadError):
                 self.jar.clear()
-        self.opener = build_opener(_SafeRedirect(), HTTPCookieProcessor(self.jar))
-        self.transfer_opener = build_opener(_SafeRedirect())
+        context = self._ssl_context()
+        https = HTTPSHandler(context=context)
+        self.opener = build_opener(_SafeRedirect(), HTTPCookieProcessor(self.jar), https)
+        self.transfer_opener = build_opener(_SafeRedirect(), HTTPSHandler(context=self._ssl_context()))
         self.login = None
         self.user_id = next((c.value for c in self.jar if c.name == "__uid"), None)
         identity = self.directory / "identity.json"
@@ -59,6 +66,11 @@ class QuarkClient:
                 self.user_id = str(json.loads(identity.read_text())["user_id"])
             except (OSError, ValueError, KeyError, TypeError):
                 pass
+
+    @classmethod
+    def _ssl_context(cls):
+        bundle = next((path for path in cls.CA_BUNDLES if Path(path).is_file()), None)
+        return ssl.create_default_context(cafile=bundle)
 
     @staticmethod
     def check_url(url):
@@ -82,7 +94,9 @@ class QuarkClient:
                 self.user_id = None
                 raise LoginExpired("夸克登录已失效，请重新扫码") from None
             raise QuarkError(f"夸克传输失败（HTTP {error.code}），请稍后重试") from None
-        except (URLError, OSError, TimeoutError):
+        except (URLError, OSError, TimeoutError) as error:
+            reason = getattr(error, "reason", error)
+            logging.getLogger(__name__).warning("夸克连接失败：%s", type(reason).__name__)
             raise QuarkError("无法连接夸克，请检查网络后重试") from None
 
     def _json(self, method, domain, path, params=None, payload=None, raw=False):
@@ -97,7 +111,18 @@ class QuarkClient:
                 raise QuarkError("夸克接口返回格式异常，请稍后重试") from None
         if not isinstance(value, dict):
             raise QuarkError("夸克接口返回格式异常")
-        if not raw and value.get("status") not in (200, 2000000):
+        if path == "/account/info":
+            data = value.get("data")
+            code = value.get("code")
+            logging.getLogger(__name__).debug(
+                "夸克账号响应诊断：status=%s code=%s success=%s data_keys=%s cookies=%s",
+                value.get("status") if isinstance(value.get("status"), (int, str)) else type(value.get("status")).__name__,
+                code if isinstance(code, int) or code == "OK" else type(code).__name__, value.get("success") is True,
+                sorted(data.keys())[:20] if isinstance(data, dict) else [],
+                sorted({cookie.name for cookie in self.jar}),
+            )
+        successful = value.get("status") in (200, 2000000) or value.get("success") is True or value.get("code") == "OK"
+        if not raw and not successful:
             code = value.get("code", value.get("status"))
             if code in (401, 403, 41001, 31001) or "login" in str(value.get("message", "")).lower():
                 self.user_id = None
@@ -121,12 +146,21 @@ class QuarkClient:
             Path(name).unlink(missing_ok=True)
 
     def account(self):
-        if not any(c.name in ("__pus", "__kps", "__uid") for c in self.jar):
+        if not any(c.name in self.AUTH_COOKIE_NAMES for c in self.jar):
+            logging.getLogger(__name__).warning(
+                "夸克账号校验没有认证 Cookie；当前 Cookie 名称：%s",
+                sorted({cookie.name for cookie in self.jar}),
+            )
             self.user_id = None
             raise LoginExpired("请先登录夸克")
         data = self._json("GET", self.PAN, "/account/info").get("data", {})
-        uid = data.get("uid") or data.get("user_id")
+        uid = data.get("uid") or data.get("user_id") or next(
+            (cookie.value for cookie in self.jar if cookie.name == "__uid"), None)
         if not uid:
+            logging.getLogger(__name__).warning(
+                "夸克账号响应中没有用户 ID；data_keys=%s cookies=%s",
+                sorted(data.keys())[:20], sorted({cookie.name for cookie in self.jar}),
+            )
             self.user_id = None
             raise LoginExpired("夸克登录已失效，请重新扫码")
         self.user_id = str(uid)
@@ -158,6 +192,13 @@ class QuarkClient:
                             {"client_id": "532", "v": "1.2", "request_id": str(uuid.uuid4()), "token": login["token"]}, raw=True)
         status = result.get("status")
         ticket = result.get("data", {}).get("members", {}).get("service_ticket")
+        if ticket or status not in (50004001, 2000000):
+            logging.getLogger(__name__).warning(
+                "夸克扫码轮询诊断：status=%s ticket_present=%s member_keys=%s",
+                status if isinstance(status, (int, str)) else type(status).__name__, bool(ticket),
+                sorted(result.get("data", {}).get("members", {}))[:20]
+                if isinstance(result.get("data"), dict) and isinstance(result.get("data", {}).get("members"), dict) else [],
+            )
         if status == 2000000 and ticket:
             self._json("GET", self.PAN, "/account/info", {"st": ticket, "lw": "scan"})
             account = self.account()

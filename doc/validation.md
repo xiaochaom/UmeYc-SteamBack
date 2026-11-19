@@ -113,3 +113,12 @@
 - 初始开发包：`artifacts/UmeYc-SteamBack-1.4.0.zip`。后续在 Deck 的 Python 3.14.6 临时目录复跑全部 54 项 Python 测试，通过；15 项前端宿主测试、TypeScript 检查、Rollup 构建和 ZIP CRC 校验通过。
 - 2026-11-19 将开发包安装到 `/home/deck/homebrew/plugins/UmeYc-SteamBack` 并重启 Decky Loader。运行日志确认 1.4.0 后端启动，运行数据目录仍为旧版兼容路径 `/home/deck/homebrew/data/Steamback`，没有改动备份目录。未创建版本标签或发布 Release。
 - 真实夸克接口探测确认扫码 token 接口返回 `status=2000000` 且含 token，轮询接口在未扫码时返回 `50004001`（等待中）。尚未扫码验证登录换会话、Cookie 持久化、网盘上传/下载和自动上传。下一步由用户在 Deck 上打开登录弹窗并使用夸克 App 扫码，然后用独立测试存档完成双向同步；不得对真实游戏存档做覆盖测试。详见 [云同步说明](cloud-sync.md)。
+
+### 2026-11-19：夸克扫码登录修复
+
+- 确认 Decky 自带 Python 运行时的 OpenSSL 默认找不到 CA bundle；显式使用 SteamOS `/etc/ssl/certs/ca-certificates.crt` 后，夸克 HTTPS 请求成功。修复已保留在 `quark.py`。
+- 用户确认二维码可显示，但扫码后登录失败。Deck 实际 `/account/info` 响应使用 `{success: true, code: "OK", data: ...}`，旧代码只接受数字 `status`，因此将有效登录响应误判为失败。
+- 更新成功响应识别，并将扫码换会话的模拟测试改为夸克的实际响应结构；在 Deck Python 3.14.6 临时源码树中，55 项 Python 测试全部通过。前端 15 项测试、TypeScript 严格检查、Rollup 构建及 ZIP 打包通过。
+- 修复已安装到 Deck 并重启 Decky Loader；实际扫码轮询返回服务票据，账号接口返回 `code=OK` 并下发 `__uid`、`__pus` 等 Cookie，但账号资料没有 `uid` 字段。修复账号 ID 获取逻辑：优先使用响应字段，缺失时从后端 CookieJar 的 `__uid` 读取；`__puus` 作为兼容名称接受。
+- 用户再次扫码后，Decky RPC 确认 `logged_in=true` 且存在用户 ID；会话 Cookie 和身份文件分别为 `0600`，凭证目录为 `0700`。模拟扫码回归覆盖资料无 `uid`、由 Cookie 提供用户 ID 的真实结构。
+- Deck Python 3.14.6 临时源码树 55 项 Python 测试通过；前端 15 项测试、TypeScript 严格检查、Rollup 构建及 ZIP 打包通过。登录闭环已通过真实 Deck 与夸克扫码验证，真实网盘上传/下载尚未验证。
