@@ -5,7 +5,7 @@ from pathlib import Path
 from zipfile import ZipFile, ZIP_DEFLATED
 
 root = Path(__file__).resolve().parents[1]
-version = json.loads((root / "package.json").read_text())["version"]
+version = json.loads((root / "package.json").read_text(encoding="utf-8"))["version"]
 if not (root / "dist/index.js").is_file():
     raise SystemExit("缺少前端构建产物，请先执行 npm run build")
 output = root / "artifacts" / f"UmeYc-SteamBack-{version}.zip"

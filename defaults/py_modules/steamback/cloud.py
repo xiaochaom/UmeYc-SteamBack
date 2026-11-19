@@ -191,7 +191,7 @@ class CloudService:
 
     def read_state(self, path=None):
         p = path or self.state_path
-        return json.loads(p.read_text()) if p.exists() else {}
+        return json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
 
     def key(self, account, game):
         return f"{self.uid}:{account}:{int(game['game_id'])}"
@@ -240,7 +240,7 @@ class CloudService:
         with tempfile.TemporaryDirectory() as temp:
             p = Path(temp) / "commit.json"
             self.client.download(entry["fid"], p, limit=1024**2)
-            record = json.loads(p.read_text())
+            record = json.loads(p.read_text(encoding="utf-8"))
         if record.get("format") != 1 or record.get("game_id") != int(game["game_id"]) or record.get("steam_account") != str(account):
             raise ValueError("云端索引不属于当前账号或游戏")
         stem = entry["file_name"].removesuffix(".json")
@@ -319,7 +319,7 @@ class CloudService:
                           "archive_name": stem + ".zip", "archive_fid": entry["fid"], "archive_hash": digest(archive),
                           "content_hash": manifest["content_hash"], "save_time": manifest["save_time"], "uploaded_at": int(time.time()*1000)}
                 p = Path(temp) / "version.json"
-                p.write_text(json.dumps(record))
+                p.write_text(json.dumps(record), encoding="utf-8")
                 self.client.upload(p, folder, stem + ".json")
                 self.remember(account, game, manifest["content_hash"])
                 return {"message": "本地存档已上传，旧云端版本保留"}
