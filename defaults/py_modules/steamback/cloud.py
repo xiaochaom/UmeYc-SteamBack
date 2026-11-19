@@ -88,14 +88,15 @@ def pack_current(engine, game, destination):
                 total += old.st_size
                 if total > MAX_BYTES or len(manifest["files"]) >= MAX_FILES:
                     raise ValueError("存档超过 2 GiB 或文件数量过多，请缩小所选范围")
-                name = f"files/{slot}/{PurePosixPath(relative).as_posix()}"
+                relative_posix = Path(relative).as_posix()
+                name = f"files/{slot}/{relative_posix}"
                 h = hashlib.sha256()
                 with path.open("rb") as src, archive.open(name, "w") as dst:
                     for chunk in iter(lambda: src.read(1024**2), b""):
                         dst.write(chunk); h.update(chunk)
                 before.append((path, old.st_size, old.st_mtime_ns))
                 latest = old.st_mtime_ns // 1000000 if latest is None else max(latest, old.st_mtime_ns // 1000000)
-                manifest["files"].append({"slot": slot, "path": str(PurePosixPath(relative)), "size": old.st_size,
+                manifest["files"].append({"slot": slot, "path": relative_posix, "size": old.st_size,
                     "mtime_ns": old.st_mtime_ns, "sha256": h.hexdigest()})
         if not manifest["files"]:
             raise ValueError("当前没有可同步的存档文件")
@@ -125,7 +126,10 @@ def unpack_verified(archive_path, staging, game, account, expected_hash):
             p = PurePosixPath(e.filename)
             if p.is_absolute() or ".." in p.parts or "\\" in e.filename or stat.S_ISLNK(e.external_attr >> 16):
                 raise ValueError("云存档包含无效路径或符号链接")
-        header = archive.getinfo("manifest.json")
+        try:
+            header = archive.getinfo("manifest.json")
+        except KeyError:
+            raise ValueError("云存档缺少文件清单") from None
         if header.file_size > 8 * 1024**2 or sum(e.file_size for e in entries) > MAX_BYTES + 8 * 1024**2:
             raise ValueError("云存档解压大小超过限制")
         m = json.loads(archive.read("manifest.json"))
@@ -381,6 +385,9 @@ class CloudService:
                 if self.active_account not in (None, account) or (account, game["game_id"]) in self.running:
                     raise ValueError("游戏已启动，云存档已下载为本地备份，未覆盖当前游戏存档")
                 await engine.do_restore({"filename": snapshot["filename"]})
+                # The imported snapshot only stages the restore; do_restore has
+                # already created the durable undo copy of the previous files.
+                engine._delete_savedir(snapshot["filename"], allow_pinned=True)
                 self.remember(account, game, manifest["content_hash"])
                 return {"message": "云端存档已同步到本地，已保留恢复前的撤销备份"}
 

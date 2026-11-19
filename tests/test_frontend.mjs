@@ -73,11 +73,18 @@ async function harness(options = {}) {
         case 'cloud_job': return cloudJob;
         case 'sniff_status': return { state: 'idle' };
         case 'sniff_start': return { state: 'watching', message: '请保存进度后退出游戏' };
-        case 'sniff_finish': return { state: 'ready', candidates: [{ path: '/home/deck/game/slot.sav', size: 2048, modified: 1770000000000 }] };
+        case 'sniff_finish': return { state: 'ready', candidates: [
+          { path: '/home/deck/game/slot.sav', size: 2048, modified: 1770000000000 },
+          { path: '/home/deck/game/other.sav', size: 1024, modified: 1770000000000 },
+        ] };
         case 'sniff_cancel': return { state: 'idle' };
         case 'find_mounted': return ['/Steam'];
         case 'get_custom_games': return custom;
-        case 'set_custom_game': custom = [{ ...args[0], paths: args[1] }]; return custom[0];
+        case 'set_custom_game': {
+          custom = custom.filter(g => g.game_id !== args[0].game_id);
+          if (args[1].length) custom.push({ ...args[0], paths: args[1] });
+          return custom.find(g => g.game_id === args[0].game_id) || args[0];
+        }
         case 'list_save_files': return { directory: '/home/deck/存档', parent: '/home/deck', entries: [{ name: 'slot.sav', path: '/home/deck/存档/slot.sav', directory: false }, { name: '子目录', path: '/home/deck/存档/子目录', directory: true }], truncated: false };
         case 'find_supported': return [{ ...args[0][0], current_save_time: 1770000000000, save_games_roots: { '/Steam/userdata/123/42/remote': '', '/home/deck/游戏存档': '_1' } }];
         case 'get_saveinfos': return saves.map(s => ({ ...s }));
@@ -326,6 +333,24 @@ test('管理页依次为选择路径、游戏路径、实际备份路径和逐�
   }
 });
 
+test('自选路径游戏可清除配置并重新嗅探，不影响当前存档和备份', async () => {
+  const h = await harness({ custom: [{ game_id: 42, game_name: '测试游戏', install_root: '/Steam', paths: ['/home/deck/custom-save'] }] });
+  h.manage(); await h.flush();
+  let tree = h.render();
+  h.find(tree, 'DialogButton', p => p.children.includes('删除自选配置')).props.onClick();
+  const confirmation = h.modal();
+  assert.equal(confirmation.props.strTitle, '删除自选存档配置');
+  assert.match(confirmation.props.strDescription, /不会删除当前存档或已有备份/);
+  await confirmation.props.onOK();
+  const clear = h.calls.findLast(c => c.method === 'set_custom_game');
+  assert.deepEqual(Array.from(clear.args[1]), []);
+  tree = h.render();
+  assert.equal(h.find(tree, 'DialogButton', p => p.children.includes('删除自选配置')), undefined);
+  assert.ok(h.find(tree, 'DialogButton', p => p.children.includes('重新嗅探存档位置') || p.children.includes('查找存档位置')));
+  assert.equal(h.calls.filter(c => c.method === 'delete_snapshot').length, 0);
+  assert.equal(h.calls.filter(c => c.method === 'do_backup').length, 0);
+});
+
 test('选择存档为 Portal 样式内嵌页面，选择文件并保存，不开启自动备份', async () => {
   const h = await harness(); h.manage(); await h.flush();
   h.find(h.render(), 'DialogButton', p => p.children.includes('选择路径')).props.onClick();
@@ -453,6 +478,30 @@ test('嗅探先记录基线，再展示变更候选，用户确认前不会配�
   tree = h.render(dialog);
   const candidate = h.find(tree, 'DialogButton', p => h.nodes({ props: p }).some(n => n.props?.children?.includes('/home/deck/game/slot.sav')));
   assert.ok(candidate); candidate.props.onClick();
+  tree = h.render(dialog);
+  await h.find(tree, 'DialogButton', p => p.children.includes('使用所选存档')).props.onClick();
+  assert.deepEqual(Array.from(h.calls.findLast(c => c.method === 'set_custom_game').args[1]), ['/home/deck/game/slot.sav']);
+});
+
+test('嗅探可选择整个目录，改选单文件时自动缩小范围', async () => {
+  const h = await harness(); h.manage(); await h.flush();
+  const SniffDialog = h.sniffType();
+  const cloud = h.child('CloudGame');
+  const dialog = { type: SniffDialog, props: { game: cloud.props.game, prepare: cloud.props.prepare, onChanged: cloud.props.onChanged, closeModal() {} } };
+  h.render(dialog); await h.flush();
+  let tree = h.render(dialog);
+  await h.find(tree, 'DialogButton', p => p.children.includes('开始查找')).props.onClick();
+  tree = h.render(dialog);
+  await h.find(tree, 'DialogButton', p => p.children.includes('完成查找')).props.onClick();
+  tree = h.render(dialog);
+  const directory = h.nodes(tree).find(n => n.type === 'DialogButton' && JSON.stringify(n.props.children).includes('整个目录：'));
+  assert.ok(directory); directory.props.onClick();
+  tree = h.render(dialog);
+  await h.find(tree, 'DialogButton', p => p.children.includes('使用所选存档')).props.onClick();
+  assert.deepEqual(Array.from(h.calls.findLast(c => c.method === 'set_custom_game').args[1]), ['/home/deck/game']);
+  tree = h.render(dialog);
+  const file = h.nodes(tree).find(n => n.type === 'DialogButton' && JSON.stringify(n.props.children).includes('/home/deck/game/slot.sav'));
+  assert.ok(file); file.props.onClick();
   tree = h.render(dialog);
   await h.find(tree, 'DialogButton', p => p.children.includes('使用所选存档')).props.onClick();
   assert.deepEqual(Array.from(h.calls.findLast(c => c.method === 'set_custom_game').args[1]), ['/home/deck/game/slot.sav']);

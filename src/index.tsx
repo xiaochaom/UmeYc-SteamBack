@@ -233,6 +233,14 @@ const Content: FC<{ side?: boolean }> = ({ side = false }) => {
       `确定删除「${si.game_info.game_name}」在 ${dateText(si.timestamp)} 的备份吗？只删除备份，不会删除游戏当前存档。此操作无法撤销。`}
       strOKButtonText="确认删除" strCancelButtonText="取消" onOK={() => action(async () => { await rpc("delete_snapshot", { filename: si.filename }); onDeleted?.() })} />)
   }
+  function removeCustomPaths(game: GameInfo) {
+    showSaveDialog(<ConfirmModal strTitle="删除自选存档配置" strDescription={
+      `确定清除「${game.game_name}」的自选存档路径配置吗？这只会清除路径设置，不会删除当前存档或已有备份。之后可以重新嗅探并选择存档位置。`}
+      strOKButtonText="清除配置" strCancelButtonText="取消" onOK={() => action(async () => {
+        await rpc("set_custom_game", { game_info: game, paths: [] })
+        await refresh()
+      })} />)
+  }
   function snapshot(si: SaveInfo) {
     return <PanelSectionRow key={si.filename}>
       <Focusable flow-children="row" style={{ display: "flex", gap: 8, minWidth: 0 }}>
@@ -271,14 +279,16 @@ const Content: FC<{ side?: boolean }> = ({ side = false }) => {
             <DialogButton disabled={busy} style={{ flex: 1, width: 0, minWidth: 0 }} onClick={() => action(refresh)}>刷新</DialogButton>
           </Focusable>
           <div style={pathStyle}>{pathText(selectedGame)}</div>
+          {custom.some(g => g.game_id === selectedGame.game_id) && <DialogButton disabled={busy} style={{ width: "100%", marginTop: 8 }}
+            onClick={() => removeCustomPaths(selectedGame)}>删除自选配置</DialogButton>}
           <div style={pathStyle}>{`备份保存路径：\n${backupRoot}`}</div>
           <div style={pathStyle}>{`当前游戏存档时间：${currentSaveTime == null ? "未找到存档文件" : dateText(currentSaveTime)}`}</div>
           <CloudGame key={selectedGame.game_id} game={selectedGame} localTime={currentSaveTime} available={available}
             hasPath={available || !!custom.find(g => g.game_id === selectedGame.game_id)?.paths?.length}
             showDialog={showSaveDialog} prepare={ensureAccount} onChanged={refresh} />
-          {!available && <DialogButton disabled={busy} style={{ width: "100%", marginTop: 8 }} onClick={() => showSaveDialog(
+          <DialogButton disabled={busy} style={{ width: "100%", marginTop: 8 }} onClick={() => showSaveDialog(
             <SniffDialog game={selectedGame} prepare={ensureAccount} onChanged={refresh} />
-          )}>查找存档位置</DialogButton>}
+          )}>{custom.some(g => g.game_id === selectedGame.game_id) || available ? "重新嗅探存档位置" : "查找存档位置"}</DialogButton>
         </PanelSectionRow>
         <PanelSectionRow><ButtonItem layout="below" disabled={busy || !available} onClick={() => action(() => backup(selectedGame))}>立即备份</ButtonItem></PanelSectionRow>
       </PanelSection>
