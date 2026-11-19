@@ -483,7 +483,7 @@ test('嗅探先记录基线，再展示变更候选，用户确认前不会配�
   assert.deepEqual(Array.from(h.calls.findLast(c => c.method === 'set_custom_game').args[1]), ['/home/deck/game/slot.sav']);
 });
 
-test('嗅探可选择整个目录，改选单文件时自动缩小范围', async () => {
+test('嗅探只提供候选文件并支持多选', async () => {
   const h = await harness(); h.manage(); await h.flush();
   const SniffDialog = h.sniffType();
   const cloud = h.child('CloudGame');
@@ -494,15 +494,13 @@ test('嗅探可选择整个目录，改选单文件时自动缩小范围', async
   tree = h.render(dialog);
   await h.find(tree, 'DialogButton', p => p.children.includes('完成查找')).props.onClick();
   tree = h.render(dialog);
-  const directory = h.nodes(tree).find(n => n.type === 'DialogButton' && JSON.stringify(n.props.children).includes('整个目录：'));
-  assert.ok(directory); directory.props.onClick();
+  assert.equal(h.nodes(tree).some(n => JSON.stringify(n.props?.children || '').includes('整个目录：')), false);
+  const files = h.nodes(tree).filter(n => n.type === 'DialogButton' && JSON.stringify(n.props?.children || '').includes('/home/deck/game/'));
+  assert.equal(files.length, 2);
+  files.forEach(file => file.props.onClick());
   tree = h.render(dialog);
   await h.find(tree, 'DialogButton', p => p.children.includes('使用所选存档')).props.onClick();
-  assert.deepEqual(Array.from(h.calls.findLast(c => c.method === 'set_custom_game').args[1]), ['/home/deck/game']);
-  tree = h.render(dialog);
-  const file = h.nodes(tree).find(n => n.type === 'DialogButton' && JSON.stringify(n.props.children).includes('/home/deck/game/slot.sav'));
-  assert.ok(file); file.props.onClick();
-  tree = h.render(dialog);
-  await h.find(tree, 'DialogButton', p => p.children.includes('使用所选存档')).props.onClick();
-  assert.deepEqual(Array.from(h.calls.findLast(c => c.method === 'set_custom_game').args[1]), ['/home/deck/game/slot.sav']);
+  assert.deepEqual(Array.from(h.calls.findLast(c => c.method === 'set_custom_game').args[1]), [
+    '/home/deck/game/slot.sav', '/home/deck/game/other.sav',
+  ]);
 });

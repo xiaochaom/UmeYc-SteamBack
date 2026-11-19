@@ -155,15 +155,6 @@ export const CloudGame: FC<{ game: CloudGameInfo; localTime?: number | null; ava
 
 type Candidate = { path: string; modified: number; size: number }
 type SniffState = { state: string; candidates?: Candidate[]; truncated?: boolean; message?: string }
-const directoryOf = (path: string) => {
-  const separator = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'))
-  if (separator <= 0) return path.slice(0, separator + 1)
-  if (separator === 2 && path[1] === ':') return path.slice(0, 3)
-  return path.slice(0, separator)
-}
-const containsPath = (directory: string, path: string) => path === directory ||
-  path.startsWith(directory.endsWith('/') || directory.endsWith('\\') ? directory : `${directory}/`) ||
-  path.startsWith(directory.endsWith('/') || directory.endsWith('\\') ? directory : `${directory}\\`)
 export const SniffDialog: FC<{ game: CloudGameInfo; prepare: () => Promise<void>; onChanged: () => Promise<void>; closeModal?: () => void }> =
 ({ game, prepare, onChanged, closeModal }) => {
   const [state, setState] = useState<SniffState>({ state: 'idle' })
@@ -171,21 +162,6 @@ export const SniffDialog: FC<{ game: CloudGameInfo; prepare: () => Promise<void>
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   useEffect(() => { void prepare().then(() => call<[CloudGameInfo], SniffState>('sniff_status', game)).then(setState).catch(e => setError(String(e))) }, [])
-  const groups = Object.values((state.candidates || []).reduce<Record<string, Candidate[]>>((result, file) => {
-    const directory = directoryOf(file.path)
-    ;(result[directory] ||= []).push(file)
-    return result
-  }, {}))
-  function togglePath(path: string, directory: boolean) {
-    setSelected(old => {
-      if (directory) {
-        if (old.includes(path)) return old.filter(p => p !== path)
-        return [...old.filter(p => !containsPath(path, p)), path]
-      }
-      if (old.includes(path)) return old.filter(p => p !== path)
-      return [...old.filter(p => !containsPath(p, path)), path]
-    })
-  }
   async function run(method: string) {
     setBusy(true); setError(''); setSelected([])
     try {
@@ -205,19 +181,11 @@ export const SniffDialog: FC<{ game: CloudGameInfo; prepare: () => Promise<void>
       </Focusable>
       {state.truncated && <div style={textStyle}>扫描范围或候选数量已达上限，结果可能不完整；也可通过“选择路径”手动指定。</div>}
       {state.state === 'ready' && !state.candidates?.length && <div style={textStyle}>未发现变更文件，请确认游戏确实保存了进度，或手动选择路径。</div>}
-      {groups.map(files => {
-        const directory = directoryOf(files[0].path)
-        return <div key={directory}>
-          <DialogButton disabled={busy} style={{ width: '100%', textAlign: 'left', marginTop: 8 }} onClick={() => togglePath(directory, true)}>
-            <div style={{ overflowWrap: 'anywhere', whiteSpace: 'normal' }}>{selected.includes(directory) ? '☑ ' : '☐ '}整个目录：{directory}</div>
-            <div style={textStyle}>递归备份目录内全部普通文件</div>
-          </DialogButton>
-          {files.map(file => <DialogButton key={file.path} disabled={busy} style={{ width: '100%', textAlign: 'left', marginTop: 4 }} onClick={() => togglePath(file.path, false)}>
-            <div style={{ overflowWrap: 'anywhere', whiteSpace: 'normal' }}>{selected.includes(file.path) ? '☑ ' : '☐ '}{file.path}</div>
-            <div style={textStyle}>{timeText(file.modified)} · {(file.size / 1024).toFixed(1)} KiB</div>
-          </DialogButton>)}
-        </div>
-      })}
+      {state.candidates?.map(file => <DialogButton key={file.path} disabled={busy} style={{ width: '100%', textAlign: 'left', marginTop: 8 }} onClick={() =>
+        setSelected(old => old.includes(file.path) ? old.filter(p => p !== file.path) : [...old, file.path])}>
+        <div style={{ overflowWrap: 'anywhere', whiteSpace: 'normal' }}>{selected.includes(file.path) ? '☑ ' : '☐ '}{file.path}</div>
+        <div style={textStyle}>{timeText(file.modified)} · {(file.size / 1024).toFixed(1)} KiB</div>
+      </DialogButton>)}
       {error && <div role="alert" style={textStyle}>{error}</div>}
       <Focusable flow-children="row" style={rowStyle}>
         <DialogButton style={buttonStyle} disabled={busy || !selected.length} onClick={async () => {
