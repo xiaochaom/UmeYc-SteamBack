@@ -105,6 +105,9 @@ class Plugin:
     async def cloud_set_auto_download(self, game_info: dict, enabled: bool):
         return await asyncio.to_thread(get_cloud().set_auto_download, current_account(), game_info, enabled)
 
+    async def cloud_set_auto_sync(self, game_info: dict, enabled: bool):
+        return await asyncio.to_thread(get_cloud().set_auto_sync, current_account(), game_info, enabled)
+
     async def cloud_prepare_launch(self, game_id: int):
         return await get_cloud().prepare_launch(current_account(), game_id)
 

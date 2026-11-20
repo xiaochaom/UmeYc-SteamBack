@@ -68,7 +68,8 @@ async function harness(options = {}) {
         case 'quark_login_poll': cloudAuth = { logged_in: true, user_id: 'quark123' }; return { state: 'logged_in', ...cloudAuth };
         case 'quark_login_cancel': return null;
         case 'quark_logout': cloudAuth = { logged_in: false, user_id: null }; return cloudAuth;
-        case 'cloud_status': return { ...cloudAuth, auto_upload: cloudAuto, auto_download: cloudAutoDownload, cloud_time: 1770000000000, uploaded_at: 1770000005000, revision: 'cloud-rev', activity: cloudJob };
+        case 'cloud_status': return { ...cloudAuth, auto_upload: cloudAuto, auto_download: cloudAutoDownload, auto_sync: cloudAuto && cloudAutoDownload, cloud_time: 1770000000000, uploaded_at: 1770000005000, revision: 'cloud-rev', activity: cloudJob };
+        case 'cloud_set_auto_sync': cloudAuto = cloudAutoDownload = args[1]; return args[1];
         case 'cloud_set_auto': cloudAuto = args[1]; return cloudAuto;
         case 'cloud_start': cloudJob = { id: 'job1', state: 'running', message: '正在同步…' }; return cloudJob;
         case 'cloud_job': return cloudJob;
@@ -268,17 +269,18 @@ test('兼容层过滤后，不支持 Steam 云的游戏分块显示在支持的�
   h.plugin.onDismount();
 });
 
-test('开始游戏前云同步开关默认关闭，使用独立 RPC 保存', async () => {
+test('统一自动云同步开关默认关闭，一次启用两个方向', async () => {
   const h = await harness({ cloudAuth: { logged_in: true, user_id: 'quark123' } });
   h.manage();
   const cloud = h.child('CloudGame');
   h.render(cloud); await h.flush();
   const tree = h.render(cloud);
-  const toggle = h.find(tree, 'ToggleField', p => p.label === '开始游戏前自动云同步');
+  const toggle = h.find(tree, 'ToggleField', p => p.label === '自动云同步');
   assert.equal(toggle.props.checked, false);
   await toggle.props.onChange(true);
-  assert.ok(h.calls.some(c => c.method === 'cloud_set_auto_download' && c.args[1] === true));
-  assert.equal(h.find(h.render(cloud), 'ToggleField', p => p.label === '游戏关闭时自动上传云存档').props.checked, false);
+  assert.ok(h.calls.some(c => c.method === 'cloud_set_auto_sync' && c.args[1] === true));
+  assert.equal(h.find(h.render(cloud), 'ToggleField', p => p.label === '自动云同步').props.checked, true);
+  assert.equal(h.nodes(h.render(cloud)).filter(n => n.type === 'ToggleField').length, 1);
   h.plugin.onDismount();
 });
 
@@ -549,11 +551,11 @@ test('云同步默认关闭，上传后台执行，下载明确确认且运行�
   const cloud = h.child('CloudGame'); assert.ok(cloud);
   h.render(cloud); await h.flush();
   let tree = h.render(cloud);
-  let toggle = h.find(tree, 'ToggleField', p => p.label === '游戏关闭时自动上传云存档');
+  let toggle = h.find(tree, 'ToggleField', p => p.label === '自动云同步');
   assert.equal(toggle.props.checked, false);
   assert.ok(h.nodes(tree).some(n => n.props?.children?.some(c => typeof c === 'string' && c.includes('云端存档时间：'))));
   await toggle.props.onChange(true);
-  assert.equal(h.calls.findLast(c => c.method === 'cloud_set_auto').args[1], true);
+  assert.equal(h.calls.findLast(c => c.method === 'cloud_set_auto_sync').args[1], true);
   tree = h.render(cloud);
   await h.find(tree, 'DialogButton', p => p.children.includes('本地同步到云端')).props.onClick();
   assert.equal(h.calls.findLast(c => c.method === 'cloud_start').args[1], 'upload');

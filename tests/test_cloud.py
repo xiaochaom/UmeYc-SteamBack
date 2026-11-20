@@ -463,3 +463,28 @@ class LaunchCloudSync(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.service.launch_game(123, 43))
         self.service.set_auto_download(123, self.game, False)
         self.assertTrue(self.service.status(123, self.game)['auto_upload'])
+
+    async def test_unified_auto_sync_is_atomic_and_account_scoped(self):
+        self.service.set_auto_sync(123, self.game, True)
+        status = self.service.status(123, self.game)
+        self.assertTrue(all(status[k] for k in ('auto_sync', 'auto_download', 'auto_upload')))
+        self.assertIsNotNone(self.service.auto_game(123, 42))
+        self.assertIsNotNone(self.service.launch_game(123, 42))
+        self.assertIsNone(self.service.launch_game(124, 42))
+        self.service.set_auto_sync(123, self.game, False)
+        status = self.service.status(123, self.game)
+        self.assertFalse(any(status[k] for k in ('auto_sync', 'auto_download', 'auto_upload')))
+        self.assertIsNone(self.service.auto_game(123, 42))
+        self.assertIsNone(self.service.launch_game(123, 42))
+
+    async def test_migration_only_preserves_explicitly_enabled_both_directions(self):
+        from steamback.custom import write_json
+        key = self.service.key(123, self.game)
+        for upload, download in ((False, False), (True, False), (False, True), (True, True)):
+            write_json(self.service.state_path, {key: {'auto_upload': upload, 'auto_download': download,
+                                                     'game': self.game, 'synced_hash': 'preserve'}})
+            service = CloudService(self.engine, self.client)
+            entry = service.read_state()[key]
+            self.assertEqual([entry[k] for k in ('auto_sync', 'auto_upload', 'auto_download')],
+                             [upload and download] * 3)
+            self.assertEqual(entry['synced_hash'], 'preserve')
