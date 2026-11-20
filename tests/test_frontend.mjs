@@ -636,3 +636,28 @@ test('嗅探只提供候选文件并支持多选', async () => {
     '/home/deck/game/slot.sav', '/home/deck/game/other.sav',
   ]);
 });
+
+test('手动同步先刷新两端时间，关闭不写入，明确选择后才同步', async () => {
+  for (const choice of ['关闭', '使用本地存档上传', '使用云端存档下载']) {
+    const h = await harness({ cloudAuth: { logged_in: true, user_id: 'quark123' } });
+    h.manage(); await h.flush();
+    const cloud = h.child('CloudGame');
+    h.render(cloud); await h.flush();
+    const before = h.calls.filter(c => c.method === 'cloud_status').length;
+    await h.find(h.render(cloud), 'DialogButton', p => p.children.includes('手动同步')).props.onClick();
+    assert.equal(h.calls.filter(c => c.method === 'cloud_status').length, before + 1);
+    const dialog = h.render(h.modal());
+    assert.ok(h.nodes(dialog).some(n => n.props?.children?.some(c => typeof c === 'string' && c.includes('本地存档时间：') && c.includes('云端存档时间：'))));
+    assert.equal(h.calls.filter(c => c.method === 'cloud_start').length, 0);
+    await h.find(dialog, 'DialogButton', p => p.children.includes(choice)).props.onClick();
+    await h.flush();
+    const commands = h.calls.filter(c => c.method === 'cloud_start');
+    if (choice === '关闭') assert.equal(commands.length, 0);
+    else {
+      assert.equal(commands.length, 1);
+      assert.equal(commands[0].args[1], choice.includes('上传') ? 'upload' : 'download');
+      assert.equal(commands[0].args[2], 'cloud-rev');
+    }
+    h.plugin.onDismount();
+  }
+});

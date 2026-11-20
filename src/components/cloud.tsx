@@ -123,14 +123,34 @@ export const CloudGame: FC<{ game: CloudGameInfo; localTime?: number | null; ava
     } catch (e) { setError(String(e)) }
     finally { setBusy(false) }
   }
-  function manualSync() {
-    showDialog(<ConfirmModal strTitle="手动同步：选择要使用的存档"
-      strDescription={`本地存档时间：${timeText(localTime)}\n云端存档时间：${timeText(state?.cloud_time)}\n选择较新的进度。使用本地会上传并替换云端版本；使用云端会下载并覆盖当前配置路径。`}
-      strOKButtonText="使用本地存档上传" strCancelButtonText="使用云端存档下载"
-      onOK={() => start('upload', state?.revision)} onCancel={() => {
-        if (state?.revision) void start('download', state.revision)
-        else setError('云端暂无存档，无法下载')
-      }} />)
+  async function manualSync() {
+    setBusy(true); setError('')
+    try {
+      await prepare()
+      if (running(game.game_id)) throw Error('请先退出游戏再同步')
+      const latest = await call<[CloudGameInfo], CloudState>('cloud_status', game)
+      setState(latest)
+      if (latest.error) throw Error(latest.error)
+      const Choice: FC<{ closeModal?: () => void }> = ({ closeModal }) => <ModalRoot
+        closeModal={closeModal} onCancel={closeModal} bCloseAfterOK={false}>
+        <Focusable flow-children="column" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <h2 style={{ fontSize: 20, margin: 0 }}>手动同步：选择要使用的存档</h2>
+          <div style={textStyle}>{`本地存档时间：${timeText(localTime)}\n云端存档时间：${timeText(latest.cloud_time)}`}</div>
+          <div style={textStyle}>使用本地会上传并替换云端版本；使用云端会下载并覆盖当前配置路径，覆盖前保留本地备份。</div>
+          <Focusable flow-children="row" style={rowStyle}>
+            <DialogButton style={buttonStyle} disabled={!available} onClick={() => {
+              closeModal?.(); void start('upload', latest.revision)
+            }}>使用本地存档上传</DialogButton>
+            <DialogButton style={buttonStyle} disabled={!latest.revision || !hasPath} onClick={() => {
+              closeModal?.(); void start('download', latest.revision)
+            }}>使用云端存档下载</DialogButton>
+          </Focusable>
+          <DialogButton onClick={closeModal}>关闭</DialogButton>
+        </Focusable>
+      </ModalRoot>
+      showDialog(<Choice />)
+    } catch (e) { setError(String(e)) }
+    finally { setBusy(false) }
   }
 
   return <div aria-label="云存档管理">
