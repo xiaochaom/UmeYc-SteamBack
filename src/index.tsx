@@ -27,6 +27,7 @@ interface SaveInfo {
   pinned: boolean
   note: string
   name?: string
+  source?: string
 }
 let steamRoot = ""
 let userHome = "/home/deck"
@@ -68,6 +69,10 @@ const dateText = (timestamp: number) => new Date(timestamp).toLocaleString("zh-C
   year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit",
   minute: "2-digit", second: "2-digit", hour12: false
 })
+const saveType = (save: SaveInfo) => save.source === "cloud_download" ? "云端下载"
+  : save.source === "before_cloud_sync" ? "同步前本地备份"
+  : save.source === "before_restore" ? "恢复前本地备份"
+  : save.is_undo ? "覆盖前本地备份" : "手动备份"
 // 新版 Decky RPC 使用位置参数，显式映射以避免对象键顺序影响调用。
 const parameterNames: Record<string, string[]> = {
   find_mounted: ["dirs"], get_saveinfos: [], get_custom_games: [],
@@ -139,14 +144,15 @@ const SnapshotDetails: FC<{
       <h2 style={{ margin: 0, fontSize: 20, lineHeight: "24px" }}>存档详情</h2>
       <div style={{ fontSize: 13, lineHeight: "18px", overflowWrap: "anywhere" }}>
         <div>{save.game_info.game_name}</div>
-        <div style={{ opacity: 0.75 }}>{dateText(save.timestamp)} · {save.is_undo ? "撤销备份" : "手动备份"}</div>
+        <div style={{ opacity: 0.75 }}>{dateText(save.timestamp)} · {saveType(save)}</div>
+        {save.is_undo && <div style={{ opacity: 0.75 }}>这是覆盖前保留的本地进度，可恢复到当时的状态。</div>}
       </div>
       <TextField label="存档名称（最多 100 字）" value={name} onChange={e => setName(e.target.value)} />
       <p style={{ margin: 0, fontSize: 12, lineHeight: "18px", opacity: 0.75 }}>删除存档只删除备份，不会删除游戏当前存档。</p>
       {error && <p role="alert" style={{ margin: 0, fontSize: 12 }}>{error}</p>}
       <Focusable flow-children="row" style={{ display: "flex", gap: 12, flexShrink: 0 }}>
         <DialogButton style={{ flex: "1 1 0", width: 0, minWidth: 0 }} disabled={busy || Router.RunningApps.some(a => Number(a.appid) === save.game_info.game_id)} onClick={onRestore}>
-          {save.is_undo ? "撤销恢复" : "恢复存档"}
+          恢复存档
         </DialogButton>
         <DialogButton style={{ flex: "1 1 0", width: 0, minWidth: 0 }} disabled={busy} onClick={() => onDelete(() => closeModal?.())}>删除存档</DialogButton>
       </Focusable>
@@ -220,7 +226,7 @@ const Content: FC<{ side?: boolean }> = ({ side = false }) => {
     setDraft({ game, paths: configured?.paths || [], directory: configured?.paths?.[0] || Object.keys(detected?.save_games_roots || {})[0] || userHome, picking: false })
   }
   function restore(si: SaveInfo) {
-    showSaveDialog(<ConfirmModal strTitle={si.is_undo ? "撤销上次恢复" : "恢复存档"}
+    showSaveDialog(<ConfirmModal strTitle="恢复存档"
       strDescription={`将「${si.game_info.game_name}」恢复到 ${dateText(si.timestamp)} 的备份。请先退出游戏；恢复前会保存可撤销备份。${si.note ? `备注：${si.note}` : ""}`}
       strOKButtonText="确认恢复" strCancelButtonText="取消" onOK={() => action(async () => {
         if (Router.RunningApps.some(a => Number(a.appid) === si.game_info.game_id)) throw new Error("请先退出游戏再恢复存档")
@@ -243,11 +249,11 @@ const Content: FC<{ side?: boolean }> = ({ side = false }) => {
   }
   function snapshot(si: SaveInfo) {
     return <PanelSectionRow key={si.filename}>
-      <Focusable flow-children="row" style={{ display: "flex", gap: 8, minWidth: 0 }}>
+      <Focusable flow-children="row" style={{ display: "flex", gap: 8, minWidth: 0, paddingBottom: 8 }}>
         <DialogButton style={{ flex: "1 1 0", minWidth: 0, textAlign: "left", padding: "10px 12px" }} disabled={busy}
           aria-label={`存档详情 ${si.filename}`} onClick={() => showSaveDialog(<SnapshotDetails save={si} onSaved={refreshSaves}
             onRestore={() => restore(si)} onDelete={onDeleted => remove(si, onDeleted)} />)}>
-          <span style={{ display: "block", fontSize: 13, whiteSpace: "normal", overflowWrap: "anywhere" }}>{si.name || (si.is_undo ? "撤销备份" : "手动存档")}</span>
+          <span style={{ display: "block", fontSize: 13, whiteSpace: "normal", overflowWrap: "anywhere" }}>{si.name || saveType(si)}</span>
           <span style={{ display: "block", fontSize: 12, whiteSpace: "normal" }}>{dateText(si.timestamp)}</span>
           {si.note && <span style={{ display: "block", fontSize: 12, opacity: 0.75, whiteSpace: "normal", overflowWrap: "anywhere" }}>{si.note}</span>}
         </DialogButton>
@@ -279,23 +285,34 @@ const Content: FC<{ side?: boolean }> = ({ side = false }) => {
             <DialogButton disabled={busy} style={{ flex: 1, width: 0, minWidth: 0 }} onClick={() => action(refresh)}>刷新</DialogButton>
           </Focusable>
           <div style={pathStyle}>{pathText(selectedGame)}</div>
+          <DialogButton disabled={busy} style={{ width: "100%", marginTop: 8 }} onClick={() => showSaveDialog(
+            <SniffDialog game={selectedGame} prepare={ensureAccount} onChanged={refresh} />
+          )}>{custom.some(g => g.game_id === selectedGame.game_id) || available ? "重新嗅探存档位置" : "查找存档位置"}</DialogButton>
           {custom.some(g => g.game_id === selectedGame.game_id) && <DialogButton disabled={busy} style={{ width: "100%", marginTop: 8 }}
             onClick={() => removeCustomPaths(selectedGame)}>删除自选配置</DialogButton>}
           <div style={pathStyle}>{`备份保存路径：\n${backupRoot}`}</div>
           <div style={pathStyle}>{`当前游戏存档时间：${currentSaveTime == null ? "未找到存档文件" : dateText(currentSaveTime)}`}</div>
+        </PanelSectionRow>
+      </PanelSection>
+      <div role="separator" aria-label="配置与云存档分隔线"
+        style={{ height: 1, backgroundColor: "#758292", margin: "18px 0", flexShrink: 0 }} />
+      <PanelSection title="云存档">
+        <PanelSectionRow>
           <CloudGame key={selectedGame.game_id} game={selectedGame} localTime={currentSaveTime} available={available}
             hasPath={available || !!custom.find(g => g.game_id === selectedGame.game_id)?.paths?.length}
             showDialog={showSaveDialog} prepare={ensureAccount} onChanged={refresh} />
-          <DialogButton disabled={busy} style={{ width: "100%", marginTop: 8 }} onClick={() => showSaveDialog(
-            <SniffDialog game={selectedGame} prepare={ensureAccount} onChanged={refresh} />
-          )}>{custom.some(g => g.game_id === selectedGame.game_id) || available ? "重新嗅探存档位置" : "查找存档位置"}</DialogButton>
         </PanelSectionRow>
-        <PanelSectionRow><ButtonItem layout="below" disabled={busy || !available} onClick={() => action(() => backup(selectedGame))}>立即备份</ButtonItem></PanelSectionRow>
       </PanelSection>
-      <PanelSection title={`选择并管理存档（${gameSaves.length}）`}>
-        {gameSaves.length ? gameSaves.map(snapshot) : <p style={{ padding: "0 16px" }}>暂无备份。选择存档路径后，点击“立即备份”保存第一份。</p>}
+      <div role="separator" aria-label="本地存档与云存档分隔线"
+        style={{ height: 1, backgroundColor: "#758292", margin: "18px 0", flexShrink: 0 }} />
+      <PanelSection title={`本地存档（${gameSaves.length}）`}>
+        <div style={{ paddingBottom: 12 }}>
+          <DialogButton disabled={busy || !available} style={{ width: "100%" }}
+            onClick={() => action(() => backup(selectedGame))}>备份到本地</DialogButton>
+        </div>
+        {gameSaves.length ? gameSaves.map(snapshot) : <p style={{ padding: "0 16px" }}>暂无备份。选择存档路径后，点击“备份到本地”保存第一份。</p>}
+        <p style={{ padding: "0 16px", fontSize: 12, opacity: 0.7 }}>本地备份手动保存，所有记录持续保留。删除存档只删除备份，不会删除游戏当前存档。</p>
       </PanelSection>
-      <p style={{ padding: "0 16px", fontSize: 12, opacity: 0.7 }}>本地备份手动保存，所有记录持续保留。删除存档只删除备份，不会删除游戏当前存档。</p>
     </PanelDialog>
   }
   if (side) return null

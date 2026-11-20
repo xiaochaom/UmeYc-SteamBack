@@ -31,7 +31,7 @@ class QuarkProtocol(unittest.TestCase):
             0, name, value, None, False, '.quark.cn', True, True, '/', True, True,
             None, True, None, None, {}, False))
 
-    def test_scan_login_persists_private_cookie_file_and_exposes_only_user_id(self):
+    def test_scan_login_persists_private_cookie_file_and_exposes_profile_without_secrets(self):
         def protocol(method, domain, path, params=None, payload=None, raw=False):
             if path.endswith('getTokenForQrcodeLogin'):
                 return {'data': {'members': {'token': 'private-token'}}}
@@ -48,7 +48,7 @@ class QuarkProtocol(unittest.TestCase):
             qr = self.client.begin_login()
             self.assertIn('private-token', qr['url'])
             result = self.client.poll_login(qr['session_id'])
-            self.assertEqual(result, {'state': 'logged_in', 'logged_in': True, 'user_id': 'user123'})
+            self.assertEqual(result, {'state': 'logged_in', 'logged_in': True, 'user_id': 'user123', 'nickname': 'tester'})
         self.assertEqual(self.client.cookie_path.stat().st_mode & 0o777, 0o600)
         self.assertNotIn('secret-cookie', json.dumps(result))
         reloaded = QuarkClient(self.root)
@@ -57,6 +57,16 @@ class QuarkProtocol(unittest.TestCase):
         self.assertFalse(reloaded.cookie_path.exists())
         with self.assertRaises(LoginExpired):
             reloaded.account()
+
+    def test_account_nickname_is_optional_and_does_not_change_identity(self):
+        self.cookie('__uid', 'user123')
+        for nickname, expected in [('  中文昵称  ', '中文昵称'), ('  ', None), (None, None), (123, None)]:
+            with self.subTest(nickname=nickname), patch.object(self.client, '_json', return_value={
+                    'data': {'nickname': nickname}}):
+                self.assertEqual(self.client.account(), {
+                    'logged_in': True, 'user_id': 'user123', 'nickname': expected})
+        with patch.object(self.client, '_json', return_value={'data': {}}):
+            self.assertIsNone(self.client.account()['nickname'])
 
     def test_expired_cancelled_and_replaced_qr_sessions(self):
         with patch.object(self.client, '_json', return_value={'data': {'members': {'token': 'test'}}}):

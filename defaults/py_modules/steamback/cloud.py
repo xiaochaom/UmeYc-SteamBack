@@ -437,7 +437,7 @@ class CloudService:
                             raise ValueError("云端文件不在本机所选存档范围内，请检查路径配置")
                     info["custom_files"][suffix].append(f["path"])
                 snapshot = engine._create_savedir(info)
-                snapshot.update(name="云端同步", files=info["custom_files"])
+                snapshot.update(source="cloud_download", files=info["custom_files"])
                 base = engine._saveinfo_to_dir(snapshot)
                 try:
                     for slot, (_, suffix) in enumerate(roots):
@@ -452,11 +452,8 @@ class CloudService:
                 if self.active_account not in (None, account) or (account, game["game_id"]) in self.running:
                     raise ValueError("游戏已启动，云存档已下载为本地备份，未覆盖当前游戏存档")
                 await engine.do_restore({"filename": snapshot["filename"]})
-                # The imported snapshot only stages the restore; do_restore has
-                # already created the durable undo copy of the previous files.
-                engine._delete_savedir(snapshot["filename"], allow_pinned=True)
                 self.remember(account, game, manifest["content_hash"])
-                return {"message": "云端存档已同步到本地，已保留恢复前的撤销备份"}
+                return {"message": "云端存档已同步到本地，已保存云端下载记录和同步前本地备份"}
 
     def record_activity(self, account, game, value, uid=None):
         with self.lock:

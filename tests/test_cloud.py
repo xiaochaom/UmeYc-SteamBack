@@ -106,12 +106,17 @@ class CloudSync(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.slot.stat().st_mtime_ns, 1700000000000000000)
         self.assertEqual(unrelated.read_bytes(), b'extra slot')
         saves = await self.engine.get_saveinfos()
-        self.assertEqual(len(saves), 1)
-        self.assertTrue(saves[0]['is_undo'])
+        self.assertEqual(len(saves), 2)
+        downloaded = next(s for s in saves if s.get('source') == 'cloud_download')
+        self.assertFalse(downloaded['is_undo'])
         undo = next(s for s in saves if s['is_undo'])
+        self.assertEqual(undo['source'], 'before_cloud_sync')
         await self.engine.do_restore(undo)
         self.assertEqual(self.slot.read_bytes(), b'chapter two')
         self.assertEqual(unrelated.read_bytes(), b'extra slot')
+        await self.engine.do_restore(downloaded)
+        self.assertEqual(self.slot.read_bytes(), b'chapter one')
+        self.assertTrue(any(s.get('source') == 'cloud_download' for s in await self.engine.get_saveinfos()))
 
     async def test_directory_upload_download_overwrites_nested_files_and_preserves_unselected_files(self):
         nested = self.source / 'profiles' / 'slot-1.sav'
@@ -131,8 +136,8 @@ class CloudSync(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(unrelated.read_bytes(), b'keep local')
 
         saves = await self.engine.get_saveinfos()
-        self.assertEqual(len(saves), 1)
-        self.assertTrue(saves[0]['is_undo'])
+        self.assertEqual(len(saves), 2)
+        self.assertTrue(any(s.get('source') == 'cloud_download' for s in saves))
         undo = next(s for s in saves if s['is_undo'])
         await self.engine.do_restore(undo)
         self.assertEqual(self.slot.read_bytes(), b'local changed')

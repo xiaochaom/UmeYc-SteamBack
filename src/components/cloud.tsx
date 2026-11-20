@@ -5,7 +5,7 @@ import QRCode from 'qrcode'
 
 export interface CloudGameInfo { game_id: number; game_name: string; install_root: string }
 type Dialog = (element: ReactNode) => unknown
-type Auth = { logged_in: boolean; user_id?: string | null; error?: string }
+type Auth = { logged_in: boolean; user_id?: string | null; nickname?: string | null; error?: string }
 type Job = { id: string; state: string; message: string; revision?: string; cloud_time?: number }
 type CloudState = Auth & { auto_upload: boolean; cloud_time?: number | null; uploaded_at?: number | null; revision?: string; activity?: Job }
 const timeText = (time?: number | null) => time == null ? '暂无存档' : new Date(time).toLocaleString('zh-CN', { hour12: false })
@@ -68,12 +68,12 @@ export const CloudAccount: FC<{ showDialog: Dialog }> = ({ showDialog }) => {
   useEffect(() => { void refresh() }, [])
   return <>
     <ButtonItem layout="below" onClick={() => auth?.logged_in ? showDialog(
-      <ConfirmModal strTitle="夸克网盘" strDescription={`用户 ID：${auth.user_id}。退出登录只清除本机登录状态，网盘存档保留。`}
+      <ConfirmModal strTitle="夸克网盘" strDescription={`${auth.nickname ? `昵称：${auth.nickname}\n` : ''}用户 ID：${auth.user_id}。退出登录只清除本机登录状态，网盘存档保留。`}
         strOKButtonText="退出登录" strCancelButtonText="关闭" onOK={async () => {
           try { setAuth(await call<[], Auth>('quark_logout')) } catch { setError('退出登录失败，请重试') }
         }} />
     ) : showDialog(<QuarkLogin onLogin={() => { void refresh() }} />)}>
-      {auth?.logged_in ? `夸克用户 ID：${auth.user_id}` : '登录夸克'}
+      {auth?.logged_in ? (auth.nickname ? `夸克：${auth.nickname}` : `夸克用户 ID：${auth.user_id}`) : '登录夸克'}
     </ButtonItem>
     {(error || auth?.error) && <div role="status" style={textStyle}>{error || auth?.error}</div>}
   </>
@@ -136,7 +136,7 @@ export const CloudGame: FC<{ game: CloudGameInfo; localTime?: number | null; ava
       <DialogButton style={buttonStyle} disabled={working || !state?.logged_in || !available || running(game.game_id)}
         onClick={() => start('upload')}>本地同步到云端</DialogButton>
       <DialogButton style={buttonStyle} disabled={working || !state?.logged_in || !state.revision || !hasPath || running(game.game_id)} onClick={() => showDialog(
-        <ConfirmModal strTitle="云端同步到本地" strDescription={`本地存档：${timeText(localTime)}\n云端存档：${timeText(state?.cloud_time)}\n将覆盖当前配置路径中的对应文件。请确认自选路径与上传时的路径顺序一致；覆盖前会生成本地撤销备份。`}
+        <ConfirmModal strTitle="云端同步到本地" strDescription={`本地存档：${timeText(localTime)}\n云端存档：${timeText(state?.cloud_time)}\n将覆盖当前配置路径中的对应文件。请确认自选路径与上传时的路径顺序一致；本地列表会保留“云端下载”和“同步前本地备份”，后者保存覆盖前的本地进度。`}
           strOKButtonText="确认同步" strCancelButtonText="取消" onOK={() => start('download', state?.revision)} />
       )}>云端同步到本地</DialogButton>
     </Focusable>

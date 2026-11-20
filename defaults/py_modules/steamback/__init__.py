@@ -764,6 +764,7 @@ class Engine(CustomSaves):
                     for root, suffix in game_info["save_games_roots"].items()
                     for files in [stored_files[suffix]]}
             undoInfo = self._create_savedir(undo_game, is_undo=True)
+            undoInfo["source"] = "before_cloud_sync" if save_info.get("source") == "cloud_download" else "before_restore"
             if stored_files is not None:
                 undoInfo["remove_on_undo"] = {
                     suffix: [f for f in files if f not in undo_game["custom_files"][suffix]]

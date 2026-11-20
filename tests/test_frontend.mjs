@@ -189,7 +189,7 @@ test('Steam 启动账号为零时等待真实账号，每次刷新重新注册�
   h.manage();
   await h.remount();
   const registered = h.calls.filter(c => c.method === 'set_account_id').length;
-  await h.button(h.render(), '立即备份').props.onClick();
+  await h.find(h.render(), 'DialogButton', p => p.children.includes('备份到本地')).props.onClick();
   assert.equal(h.calls.filter(c => c.method === 'set_account_id').length, registered + 1);
   assert.equal(h.calls.findLast(c => c.method === 'set_account_id').args[0], 443765038);
   assert.ok(h.calls.some(c => c.method === 'do_backup'));
@@ -216,7 +216,7 @@ test('首页仅刷新与游戏列表，点击游戏打开 Steam 原生存档弹�
   assert.equal(h.listener, undefined);
   assert.equal(h.calls.filter(c => c.method === 'do_backup').length, 0);
   h.manage(); await h.flush();
-  await h.button(h.render(), '立即备份').props.onClick();
+  await h.find(h.render(), 'DialogButton', p => p.children.includes('备份到本地')).props.onClick();
   const backup = h.calls.find(c => c.method === 'do_backup');
   assert.equal(backup.args[0].game_id, 42);
   assert.equal(backup.args.length, 2);
@@ -266,6 +266,21 @@ test('存档统一按时间倒序，无固定按钮；详情两行操作、重�
   assert.equal(h.calls.filter(c => c.method === 'delete_snapshot').length, 0);
   await h.modal().props.onOK();
   assert.equal(h.calls.find(c => c.method === 'delete_snapshot').args[0], saves[0].filename);
+});
+
+test('云端下载和同步前本地备份按来源命名，旧备份显示覆盖前本地备份', async () => {
+  for (const [source, isUndo, label] of [['cloud_download', false, '云端下载'], ['before_cloud_sync', true, '同步前本地备份'], [undefined, true, '覆盖前本地备份']]) {
+    const save = { filename: 'save_42_1770000000000', timestamp: 1770000000000,
+      game_info: { game_id: 42, game_name: '测试游戏', install_root: '/Steam' },
+      pinned: false, note: '', is_undo: isUndo, source };
+    const h = await harness({ saves: [save] }); h.manage(); await h.flush();
+    const row = h.find(h.render(), 'DialogButton', p => p['aria-label']?.startsWith('存档详情 '));
+    assert.ok(h.nodes(row).some(n => n.props?.children?.includes(label)));
+    row.props.onClick();
+    const details = h.render(h.modal());
+    assert.ok(h.nodes(details).some(n => n.props?.children?.includes(label)));
+    assert.ok(h.find(details, 'DialogButton', p => p.children.includes('恢复存档')));
+  }
 });
 
 test('名称保存失败时保留详情和游戏管理弹窗，可用关闭仅退出详情', async () => {
@@ -331,6 +346,17 @@ test('管理页依次为选择路径、游戏路径、实际备份路径和逐�
     assert.equal(nodes[path].props.children.join(''), custom.length ? '自选存档路径：\n/home/deck/自选槽位.sav\n/run/media/存档' : '自动识别的存档路径：\n/Steam/userdata/123/42/remote\n/home/deck/游戏存档');
     h.render().props.onOK();
   }
+});
+
+test('云存档在上、本地备份与列表在下，两个分区之间显示分隔线', async () => {
+  const h = await harness(); h.manage(); await h.flush();
+  const tree = h.render();
+  const nodes = h.nodes(tree);
+  const local = nodes.findIndex(n => n.type === 'PanelSection' && String(n.props.title).startsWith('本地存档'));
+  const backup = nodes.findIndex(n => n.type === 'DialogButton' && n.props.children.includes('备份到本地'));
+  const divider = nodes.findIndex(n => n.props?.role === 'separator' && n.props['aria-label']?.includes('本地存档'));
+  const cloud = nodes.findIndex(n => n.type === 'PanelSection' && n.props.title === '云存档');
+  assert.ok(cloud >= 0 && divider > cloud && local > divider && backup > local);
 });
 
 test('自选路径游戏可清除配置并重新嗅探，不影响当前存档和备份', async () => {
@@ -417,6 +443,18 @@ test('夸克首页未登录扫码、登录后显示 ID，退出只清本机状�
   assert.ok(h.button(h.render(account), '登录夸克'));
 });
 
+test('夸克首页优先显示昵称，账号详情保留昵称及 ID', async () => {
+  const h = await harness({ cloudAuth: { logged_in: true, user_id: 'quark123', nickname: '小超' } });
+  const account = h.child('CloudAccount');
+  h.render(account); await h.flush();
+  h.button(h.render(account), '夸克：小超').props.onClick();
+  const confirm = h.modal();
+  assert.match(confirm.props.strDescription, /昵称：小超/);
+  assert.match(confirm.props.strDescription, /用户 ID：quark123/);
+  await confirm.props.onOK();
+  assert.ok(h.button(h.render(account), '登录夸克'));
+});
+
 test('云同步默认关闭，上传后台执行，下载明确确认且运行时禁止覆盖', async () => {
   const h = await harness({ cloudAuth: { logged_in: true, user_id: 'quark123' } });
   h.manage(); await h.flush();
@@ -437,7 +475,7 @@ test('云同步默认关闭，上传后台执行，下载明确确认且运行�
   tree = h.render(cloud);
   h.find(tree, 'DialogButton', p => p.children.includes('云端同步到本地')).props.onClick();
   const confirmation = h.modal();
-  assert.match(confirmation.props.strDescription, /本地存档.*云端存档.*撤销备份/s);
+  assert.match(confirmation.props.strDescription, /本地存档.*云端存档.*云端下载.*同步前本地备份/s);
   assert.equal(h.calls.filter(c => c.method === 'cloud_start').length, 1);
   h.running.push({ appid: '42' });
   await confirmation.props.onOK();

@@ -172,7 +172,9 @@ class QuarkClient:
             os.replace(name, self.directory / "identity.json")
         finally:
             Path(name).unlink(missing_ok=True)
-        return {"logged_in": True, "user_id": self.user_id}
+        nickname = data.get("nickname")
+        nickname = nickname.strip() if isinstance(nickname, str) else None
+        return {"logged_in": True, "user_id": self.user_id, "nickname": nickname or None}
 
     def begin_login(self):
         result = self._json("GET", self.UOP, "/cas/ajax/getTokenForQrcodeLogin",
