@@ -415,6 +415,77 @@ class LaunchCloudSync(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.client, 'account', side_effect=AssertionError('unexpected network')):
             result = await self.service.prepare_launch(123, 42)
         self.assertFalse(result['synced'])
+        record = self.service.read_state(self.service.activity_path)[self.service.key(123, self.game)]
+        self.assertEqual(record['phase'], 'prelaunch')
+        self.assertEqual(record['message'], '启动前检查：启动前云同步未开启')
+
+    async def test_cached_quark_identity_cannot_silently_disable_launch_sync(self):
+        await self.upload()
+        self.service.set_auto_sync(123, self.game, True)
+        self.service.uid = 'cookie-alias'
+        result = await self.service.prepare_launch(123, 42)
+        self.assertIn('本地与云端一致', result['message'])
+        self.assertEqual(self.service.uid, self.client.user_id)
+
+    async def test_changed_quark_account_does_not_use_another_accounts_configuration(self):
+        self.service.set_auto_sync(123, self.game, True)
+        before = self.service.read_state()
+        self.client.user_id = 'another-account'
+        with self.assertRaisesRegex(ValueError, '账号已变化'):
+            await self.service.prepare_launch(123, 42)
+        self.assertEqual(self.service.read_state(), before)
+        self.assertEqual(self.slot.read_bytes(), b'chapter one')
+
+    async def test_stale_identity_network_failure_is_reported_instead_of_skipping_sync(self):
+        self.service.set_auto_sync(123, self.game, True)
+        self.service.uid = 'cookie-alias'
+        with patch.object(self.client, 'account', side_effect=QuarkError('请检查网络')):
+            with self.assertRaisesRegex(QuarkError, '检查网络'):
+                await self.service.prepare_launch(123, 42)
+        record = self.service.read_state(self.service.activity_path)[self.service.key(123, self.game)]
+        self.assertEqual(record['state'], 'error')
+        self.assertIn('检查网络', record['message'])
+        self.assertEqual(self.slot.read_bytes(), b'chapter one')
+
+    async def test_independent_device_upload_is_pulled_by_restarted_launch_client(self):
+        await self._independent_device_launch(stale_identity=False)
+
+    async def test_independent_device_launch_with_stale_identity(self):
+        await self._independent_device_launch(stale_identity=True)
+
+    async def _independent_device_launch(self, stale_identity):
+        await self.upload()
+        device = self.root / 'second-device'
+        destination = device / 'saves'
+        destination.mkdir(parents=True)
+        engine = Engine(Config(logging.getLogger('test'), str(device / 'data'), str(device / 'Steam')))
+        engine.account_ids = {123}
+        game = {**self.game, 'install_root': engine.get_steam_root()}
+        engine.set_custom_game(game, [str(destination)])
+        # Separate local state and client, sharing only the simulated server.
+        client = copy.copy(self.client)
+        client.upload = self.client.upload
+        service = CloudService(engine, client)
+        remote = service.latest(123, game)
+        await service.download(123, game, remote['revision'])
+        service.set_auto_sync(123, game, True)
+        baseline = service.read_state()[service.key(123, game)]['synced_hash']
+
+        self.slot.write_bytes(b'chapter from another device')
+        await self.upload()
+        remote = self.service.latest(123, self.game)
+        self.assertNotEqual(remote['content_hash'], baseline)
+        self.assertEqual((destination / 'slot.sav').read_bytes(), b'chapter one')
+        restarted = CloudService(engine, client)
+        if stale_identity:
+            restarted.uid = 'cookie-alias'
+        self.assertTrue((await restarted.prepare_launch(123, 42))['synced'])
+        self.assertEqual((destination / 'slot.sav').read_bytes(), b'chapter from another device')
+        self.assertEqual(restarted.read_state()[restarted.key(123, game)]['synced_hash'], remote['content_hash'])
+        self.assertTrue(any(s.get('source') == 'before_cloud_sync' for s in await engine.get_saveinfos()))
+        record = restarted.status(123, game)['activity']
+        self.assertTrue(record['synced'])
+        self.assertEqual(record['revision'], remote['revision'])
 
     async def test_prelaunch_syncs_remote_when_local_is_last_synced(self):
         await self.upload()
