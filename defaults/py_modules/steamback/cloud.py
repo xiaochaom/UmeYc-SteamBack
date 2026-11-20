@@ -264,14 +264,16 @@ class CloudService:
         if job and job["state"] == "running":
             saved = self.read_state().get(key, {})
             return {"logged_in": bool(self.uid), "user_id": self.uid, "auto_upload": False,
-                    **self.status_cache.get(key, {}), "auto_upload": saved.get("auto_upload", False), "activity": job}
+                    **self.status_cache.get(key, {}), "auto_upload": saved.get("auto_upload", False),
+                    "auto_download": saved.get("auto_download", False), "activity": job}
         with self.lock:
             self.isolated_engine(account)
             auth = self.account_status()
             key = self.key(account, game)
             entry = self.read_state().get(key, {})
             activity = job or self.read_state(self.activity_path).get(key)
-            result = {**auth, "auto_upload": entry.get("auto_upload", False), "activity": activity,
+            result = {**auth, "auto_upload": entry.get("auto_upload", False),
+                      "auto_download": entry.get("auto_download", False), "activity": activity,
                       "cloud_time": None, "uploaded_at": None, "revision": None}
             if not auth["logged_in"] or auth.get("error"):
                 return result
@@ -526,3 +528,68 @@ class CloudService:
             return None
         entry = self.read_state().get(f"{self.uid}:{account}:{int(game_id)}", {})
         return entry.get("game") if entry.get("auto_upload") else None
+
+
+    def set_auto_download(self, account, game, enabled):
+        with self.lock:
+            self.isolated_engine(account)
+            if type(enabled) is not bool:
+                raise ValueError("无效的启动前同步开关")
+            if not self.account_status()["logged_in"]:
+                raise ValueError("请先登录夸克")
+            state = self.read_state()
+            entry = state.setdefault(self.key(account, game), {})
+            entry.update(auto_download=enabled, game={k: game[k] for k in ("game_id", "game_name", "install_root")})
+            write_json(self.state_path, state)
+            return enabled
+
+    def launch_game(self, account, game_id):
+        self.isolated_engine(account)
+        state = self.read_state()
+        if not self.uid:
+            suffix = f":{account}:{int(game_id)}"
+            if any(k.endswith(suffix) and v.get("auto_download") for k, v in state.items()):
+                raise ValueError("此游戏已开启启动前云同步，请先登录夸克或关闭该开关")
+            return None
+        entry = state.get(f"{self.uid}:{account}:{int(game_id)}", {})
+        return entry.get("game") if entry.get("auto_download") else None
+
+    def _prepare_launch(self, account, game_id):
+        # Run under the service lock; launches never apply cloud data after the
+        # game is running. The launcher must await this result before RunGame.
+        with self.lock:
+            game = self.launch_game(account, game_id)
+            if game is None:
+                return {"message": "启动前云同步未开启", "synced": False}
+            expected_uid = self.uid
+            self.uid = self.client.account()["user_id"]
+            if self.uid != expected_uid or self.active_account not in (None, account):
+                raise ValueError("账号已变化，请刷新后再启动游戏")
+            if (account, int(game_id)) in self.running:
+                raise ValueError("游戏已在运行，未执行启动前同步")
+            engine = self.isolated_engine(account)
+            remote = self.latest(account, game)
+            if remote is None:
+                return {"message": "云端暂无存档，将使用本地存档启动", "synced": False}
+            info, files, _ = source_plan(engine, game)
+            local_hash = None
+            if any(files.values()):
+                with tempfile.TemporaryDirectory() as temp:
+                    local_hash = pack_current(engine, game, Path(temp) / "local.zip")["content_hash"]
+            previous = self.read_state().get(self.key(account, game), {}).get("synced_hash")
+            if local_hash == remote["content_hash"]:
+                self.remember(account, game, local_hash)
+                return {"message": "本地与云端一致，可以启动", "synced": False}
+            if local_hash is not None and previous and remote["content_hash"] == previous:
+                return {"message": "本地包含新的进度，将保留本地存档启动", "synced": False}
+            if local_hash is not None and local_hash != previous:
+                raise ValueError("本地和云端均有未同步的不同进度，请先手动选择同步方向，再启动游戏")
+            self._download_for_launch(account, game, remote["revision"], expected_uid)
+            return {"message": "启动前云存档同步完成", "synced": True}
+
+    def _download_for_launch(self, account, game, revision, uid):
+        asyncio.run(self.download(account, game, revision, uid))
+
+    async def prepare_launch(self, account, game_id):
+        async with self.job_gate:
+            return await asyncio.to_thread(self._prepare_launch, account, game_id)

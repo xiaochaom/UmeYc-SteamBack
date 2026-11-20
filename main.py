@@ -6,6 +6,7 @@ import decky
 from steamback.browser import list_save_files
 from steamback.cloud import CloudService
 from steamback.sniff import SaveSniffer
+from steamback.appinfo import cloud_support
 
 logger = decky.logger
 
@@ -57,6 +58,9 @@ def get_engine() -> object:
 
 class Plugin:
 
+    async def get_steam_cloud_support(self, game_ids: list):
+        return await asyncio.to_thread(cloud_support, get_engine().get_steam_root(), game_ids)
+
     async def quark_account(self):
         return await asyncio.to_thread(get_cloud().account_status)
 
@@ -97,6 +101,12 @@ class Plugin:
 
     async def cloud_set_auto(self, game_info: dict, enabled: bool):
         return await asyncio.to_thread(get_cloud().set_auto, current_account(), game_info, enabled)
+
+    async def cloud_set_auto_download(self, game_info: dict, enabled: bool):
+        return await asyncio.to_thread(get_cloud().set_auto_download, current_account(), game_info, enabled)
+
+    async def cloud_prepare_launch(self, game_id: int):
+        return await get_cloud().prepare_launch(current_account(), game_id)
 
     async def cloud_start(self, game_info: dict, direction: str, revision: str = None):
         return get_cloud().start_job(current_account(), game_info, direction, revision)

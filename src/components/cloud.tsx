@@ -7,7 +7,7 @@ export interface CloudGameInfo { game_id: number; game_name: string; install_roo
 type Dialog = (element: ReactNode) => unknown
 type Auth = { logged_in: boolean; user_id?: string | null; nickname?: string | null; error?: string }
 type Job = { id: string; state: string; message: string; revision?: string; cloud_time?: number }
-type CloudState = Auth & { auto_upload: boolean; cloud_time?: number | null; uploaded_at?: number | null; revision?: string; activity?: Job }
+type CloudState = Auth & { auto_upload: boolean; auto_download?: boolean; cloud_time?: number | null; uploaded_at?: number | null; revision?: string; activity?: Job }
 const timeText = (time?: number | null) => time == null ? '暂无存档' : new Date(time).toLocaleString('zh-CN', { hour12: false })
 const textStyle = { fontSize: 12, opacity: 0.8, overflowWrap: 'anywhere' as const, margin: '8px 0' }
 const rowStyle = { display: 'flex', gap: 8, marginTop: 8 }
@@ -126,6 +126,12 @@ export const CloudGame: FC<{ game: CloudGameInfo; localTime?: number | null; ava
   return <div aria-label="云存档管理">
     <div style={textStyle}>{`云端存档时间：${state?.error ? '读取失败，请刷新' : state ? timeText(state.cloud_time) : '正在读取…'}`}</div>
     {state?.uploaded_at != null && <div style={textStyle}>{`最近上传时间：${timeText(state.uploaded_at)}`}</div>}
+    <ToggleField label="开始游戏前自动云同步" description="默认关闭，启动前下载云端新进度；存在本地未上传进度时暂停启动并提示" checked={state?.auto_download ?? false}
+      disabled={working || !state?.logged_in} onChange={async value => {
+        setBusy(true)
+        try { await prepare(); await call<[CloudGameInfo, boolean], boolean>('cloud_set_auto_download', game, value); await refresh(); setError('') }
+        catch (e) { setError(String(e)) } finally { setBusy(false) }
+      }} />
     <ToggleField label="游戏关闭时自动上传云存档" description="默认关闭，仅对当前游戏及账号生效" checked={state?.auto_upload ?? false}
       disabled={working || !state?.logged_in} onChange={async value => {
         setBusy(true)

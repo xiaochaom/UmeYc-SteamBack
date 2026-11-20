@@ -1,6 +1,6 @@
 {
   "name": "steamback",
-  "version": "1.4.5",
+  "version": "1.4.6",
   "description": "中文游戏存档管理：手动备份、自选路径、重命名与恢复",
   "scripts": {
     "build": "npm run typecheck && rollup -c",

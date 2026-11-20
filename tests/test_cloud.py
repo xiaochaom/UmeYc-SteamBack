@@ -405,3 +405,61 @@ class CloudSync(unittest.IsolatedAsyncioTestCase):
         newer = self.client.upload(src, folder, 'version-1700000000000-'+'c'*32+'.zip')
         self.service._prune_versions(123, self.game, folder, before, current)
         self.assertIn(newer['fid'], self.client.items)
+
+
+class LaunchCloudSync(unittest.IsolatedAsyncioTestCase):
+    setUp = CloudSync.setUp
+    upload = CloudSync.upload
+    async def test_prelaunch_defaults_off_and_never_calls_network(self):
+        with patch.object(self.client, 'account', side_effect=AssertionError('unexpected network')):
+            result = await self.service.prepare_launch(123, 42)
+        self.assertFalse(result['synced'])
+
+    async def test_prelaunch_syncs_remote_when_local_is_last_synced(self):
+        await self.upload()
+        previous = self.slot.read_bytes()
+        self.slot.write_bytes(b'remote chapter')
+        await self.upload()
+        self.slot.write_bytes(previous)
+        manifest = pack_current(self.engine, self.game, self.root/'previous.zip')
+        self.service.remember(123, self.game, manifest['content_hash'])
+        self.service.set_auto_download(123, self.game, True)
+        result = await self.service.prepare_launch(123, 42)
+        self.assertTrue(result['synced'])
+        self.assertEqual(self.slot.read_bytes(), b'remote chapter')
+        self.assertTrue(any(s.get('source') == 'before_cloud_sync' for s in await self.engine.get_saveinfos()))
+
+    async def test_prelaunch_conflicting_local_blocks_without_overwrite(self):
+        await self.upload()
+        self.service.state_path.unlink()
+        self.service.set_auto_download(123, self.game, True)
+        self.slot.write_bytes(b'unsynced local')
+        with self.assertRaisesRegex(ValueError, '手动选择'):
+            await self.service.prepare_launch(123, 42)
+        self.assertEqual(self.slot.read_bytes(), b'unsynced local')
+
+    async def test_prelaunch_keeps_local_when_only_local_changed(self):
+        await self.upload()
+        self.service.set_auto_download(123, self.game, True)
+        self.slot.write_bytes(b'local new')
+        self.assertFalse((await self.service.prepare_launch(123, 42))['synced'])
+        self.assertEqual(self.slot.read_bytes(), b'local new')
+
+    async def test_prelaunch_enabled_login_expired_or_running_blocks(self):
+        self.service.set_auto_download(123, self.game, True)
+        self.service.uid = None
+        with self.assertRaisesRegex(ValueError, '登录夸克'):
+            await self.service.prepare_launch(123, 42)
+        self.service.uid = self.client.user_id
+        self.service.running.add((123, 42))
+        with self.assertRaisesRegex(ValueError, '已在运行'):
+            await self.service.prepare_launch(123, 42)
+
+    async def test_download_and_upload_switches_independent_and_scoped(self):
+        self.service.set_auto(123, self.game, True)
+        self.service.set_auto_download(123, self.game, True)
+        self.assertTrue(self.service.status(123, self.game)['auto_download'])
+        self.assertIsNone(self.service.launch_game(124, 42))
+        self.assertIsNone(self.service.launch_game(123, 43))
+        self.service.set_auto_download(123, self.game, False)
+        self.assertTrue(self.service.status(123, self.game)['auto_upload'])

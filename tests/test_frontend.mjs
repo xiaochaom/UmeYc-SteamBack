@@ -19,6 +19,7 @@ async function harness(options = {}) {
   let menu = 2;
   let cloudAuth = options.cloudAuth || { logged_in: false, user_id: null };
   let cloudAuto = false;
+  let cloudAutoDownload = false;
   let cloudJob = null;
   const menuStore = { GetOpenSideMenu: () => menu, CloseSideMenus() { menu = 0; } };
   const running = [];
@@ -67,7 +68,7 @@ async function harness(options = {}) {
         case 'quark_login_poll': cloudAuth = { logged_in: true, user_id: 'quark123' }; return { state: 'logged_in', ...cloudAuth };
         case 'quark_login_cancel': return null;
         case 'quark_logout': cloudAuth = { logged_in: false, user_id: null }; return cloudAuth;
-        case 'cloud_status': return { ...cloudAuth, auto_upload: cloudAuto, cloud_time: 1770000000000, uploaded_at: 1770000005000, revision: 'cloud-rev', activity: cloudJob };
+        case 'cloud_status': return { ...cloudAuth, auto_upload: cloudAuto, auto_download: cloudAutoDownload, cloud_time: 1770000000000, uploaded_at: 1770000005000, revision: 'cloud-rev', activity: cloudJob };
         case 'cloud_set_auto': cloudAuto = args[1]; return cloudAuto;
         case 'cloud_start': cloudJob = { id: 'job1', state: 'running', message: '正在同步…' }; return cloudJob;
         case 'cloud_job': return cloudJob;
@@ -80,6 +81,12 @@ async function harness(options = {}) {
         case 'sniff_cancel': return { state: 'idle' };
         case 'find_mounted': return ['/Steam'];
         case 'get_custom_games': return custom;
+        case 'get_steam_cloud_support': return options.cloudSupport || { '42': true };
+        case 'cloud_set_auto_download': cloudAutoDownload = args[1]; return cloudAutoDownload;
+        case 'cloud_prepare_launch': {
+          if (options.prepareLaunch) return options.prepareLaunch(args[0]);
+          return { message: '可以启动', synced: false };
+        }
         case 'set_custom_game': {
           custom = custom.filter(g => g.game_id !== args[0].game_id);
           if (args[1].length) custom.push({ ...args[0], paths: args[1] });
@@ -97,6 +104,11 @@ async function harness(options = {}) {
     },
   };
   const dfl = new Proxy({
+    replacePatch(object, key, handler) {
+      const original = object[key];
+      object[key] = function (...args) { return handler(args); };
+      return { original, unpatch() { object[key] = original; } };
+    },
     beforePatch(object, key, handler) {
       const original = object[key];
       object[key] = function (...args) { handler(args); return original.apply(this, args); };
@@ -122,11 +134,12 @@ async function harness(options = {}) {
     window: { innerWidth: options.width || 854, innerHeight: 534, SP_REACT: react,
       SteamUIStore: { WindowStore: { GamepadUIMainWindowInstance: { MenuStore: menuStore } } },
       setInterval(fn) { timers.add(fn); return fn; }, clearInterval(fn) { timers.delete(fn); },
+      setTimeout, clearTimeout,
       __DECKY_SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED_deckyLoaderAPIInit: { connect: () => api } },
     App: { m_CurrentUser: { strSteamID: options.steamID ?? '76561197960265851' } },
     SteamClient: {
-      InstallFolder: { GetInstallFolders: async () => [{ strFolderPath: '/Steam', vecApps: [{ nAppID: 42, strAppName: '测试游戏' }] }] },
-      Apps: { GetAllShortcuts: async () => [{ appid: -1, data: { strAppName: '非 Steam 游戏' } }] },
+      InstallFolder: { GetInstallFolders: async () => [{ strFolderPath: '/Steam', vecApps: options.games || [{ nAppID: 42, strAppName: '测试游戏' }] }] },
+      Apps: { RunGame(...args) { calls.push({ method: 'native_RunGame', args }); }, GetAllShortcuts: async () => [{ appid: -1, data: { strAppName: '非 Steam 游戏' } }] },
       GameSessions: { RegisterForAppLifetimeNotifications(fn) { listener = fn; return { unregister() {} }; } },
     },
   });
@@ -166,6 +179,7 @@ async function harness(options = {}) {
   async function flush() { effects.splice(0).forEach(effect => effect()); await new Promise(resolve => setImmediate(resolve)); }
   return { render, find, nodes, calls, listener, running, manage, remount, flush, modal: () => modal, dialogs,
     plugin,
+    runGame(...args) { context.SteamClient.Apps.RunGame(...args); },
     sniffType() { return vm.runInContext('SniffDialog', context); },
     child(name, tree = render()) { return nodes(tree).find(n => typeof n.type === 'function' && n.type.name === name); },
     completeJob(value) { cloudJob = { id: 'job1', ...value }; },
@@ -195,6 +209,79 @@ test('Steam 启动账号为零时等待真实账号，每次刷新重新注册�
   assert.ok(h.calls.some(c => c.method === 'do_backup'));
 });
 
+test('启动请求等待云同步完成，重复点击只启动一次并保留原参数', async () => {
+  let resolve;
+  const waiting = new Promise(r => { resolve = r; });
+  const h = await harness({ prepareLaunch: () => waiting });
+  h.runGame('42', 'options', 0, 100);
+  h.runGame('42', 'options', 0, 100);
+  await h.flush();
+  assert.equal(h.calls.filter(c => c.method === 'native_RunGame').length, 0);
+  assert.equal(h.calls.filter(c => c.method === 'cloud_prepare_launch').length, 1);
+  resolve({ message: 'synced', synced: true });
+  await h.flush();
+  assert.deepEqual(Array.from(h.calls.find(c => c.method === 'native_RunGame').args), ['42', 'options', 0, 100]);
+  assert.equal(h.calls.filter(c => c.method === 'native_RunGame').length, 1);
+  h.plugin.onDismount();
+});
+
+test('同步失败先暂停启动，明确选择本地版本后才启动；不使用 Deck 通知', async () => {
+  const h = await harness({ prepareLaunch: () => { throw Error('本地云端冲突'); } });
+  h.runGame('42', '', 0, 100);
+  await h.flush();
+  assert.equal(h.calls.filter(c => c.method === 'native_RunGame').length, 0);
+  assert.equal(h.modal().props.strTitle, '启动前云同步未完成');
+  h.modal().props.onOK();
+  assert.equal(h.calls.filter(c => c.method === 'native_RunGame').length, 1);
+  h.plugin.onDismount();
+});
+
+test('同步期间切换账号或卸载插件不会继续旧启动请求', async () => {
+  for (const change of ['account', 'unload']) {
+    let resolve;
+    const waiting = new Promise(r => { resolve = r; });
+    const h = await harness({ prepareLaunch: () => waiting });
+    h.runGame('42', '', 0, 100);
+    await h.flush();
+    if (change === 'account') h.setSteamID('76561198404030766');
+    else h.plugin.onDismount();
+    resolve({ message: 'done', synced: false });
+    await h.flush();
+    assert.equal(h.calls.filter(c => c.method === 'native_RunGame').length, 0);
+    if (change === 'account') h.plugin.onDismount();
+  }
+});
+
+test('兼容层过滤后，不支持 Steam 云的游戏分块显示在支持的上方', async () => {
+  const h = await harness({ games: [
+    { nAppID: 42, strAppName: '支持云游戏' }, { nAppID: 43, strAppName: '不支持云游戏' },
+    { nAppID: 44, strAppName: 'Proton - Experimental' }, { nAppID: 45, strAppName: 'GE-Proton9-25' },
+    { nAppID: 46, strAppName: 'Steam Linux Runtime 3.0 (sniper)' }, { nAppID: 47, strAppName: 'Proton Pulse' }
+  ], cloudSupport: { '42': true, '43': false, '47': false } });
+  const tree = h.render();
+  const names = h.nodes(tree).filter(n => n.type === 'ButtonItem').map(n => n.props.children.join(''));
+  assert.ok(names.includes('Proton Pulse'));
+  for (const name of ['Proton - Experimental', 'GE-Proton9-25', 'Steam Linux Runtime 3.0 (sniper)']) assert.ok(!names.includes(name));
+  const headings = h.nodes(tree).filter(n => n.type === 'PanelSection').map(n => n.props.title).filter(Boolean);
+  assert.ok(headings[0].startsWith('不支持 Steam 云存档'));
+  assert.ok(headings[1].startsWith('支持 Steam 云存档'));
+  h.plugin.onDismount();
+});
+
+test('开始游戏前云同步开关默认关闭，使用独立 RPC 保存', async () => {
+  const h = await harness({ cloudAuth: { logged_in: true, user_id: 'quark123' } });
+  h.manage();
+  const cloud = h.child('CloudGame');
+  h.render(cloud); await h.flush();
+  const tree = h.render(cloud);
+  const toggle = h.find(tree, 'ToggleField', p => p.label === '开始游戏前自动云同步');
+  assert.equal(toggle.props.checked, false);
+  await toggle.props.onChange(true);
+  assert.ok(h.calls.some(c => c.method === 'cloud_set_auto_download' && c.args[1] === true));
+  assert.equal(h.find(h.render(cloud), 'ToggleField', p => p.label === '游戏关闭时自动上传云存档').props.checked, false);
+  h.plugin.onDismount();
+});
+
 test('账号持续未就绪时不扫描错误目录，账号就绪后可以刷新恢复', async () => {
   const h = await harness({ steamID: '0' });
   assert.equal(h.calls.filter(c => c.method === 'set_account_id' || c.method === 'find_supported').length, 0);
@@ -209,7 +296,8 @@ test('首页仅刷新与游戏列表，点击游戏打开 Steam 原生存档弹�
   const h = await harness();
   const tree = h.render();
   assert.ok(h.button(tree, '刷新'));
-  assert.ok(h.find(tree, 'PanelSection', p => p.title === '游戏（2）'));
+  assert.ok(h.find(tree, 'PanelSection', p => p.title === '不支持 Steam 云存档（1）'));
+  assert.ok(h.find(tree, 'PanelSection', p => p.title === '支持 Steam 云存档（1）'));
   assert.ok(h.button(tree, '测试游戏'));
   assert.ok(h.button(tree, '非 Steam 游戏'));
   assert.equal(h.nodes(tree).filter(n => n.type === 'ToggleField').length, 0);

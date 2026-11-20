@@ -10,6 +10,8 @@ import { PanelDialog } from "./components/panel-dialog"
 import { SavePaths, PathDraft } from "./components/save-paths"
 import { CloudAccount, CloudGame, SniffDialog } from "./components/cloud"
 import { CloudSaveIcon } from "./components/cloud-save-icon"
+import { installLaunchSync } from "./components/launch-sync"
+import { isCompatibilityTool } from "./game-filter"
 
 interface GameInfo {
   game_id: number
@@ -18,6 +20,7 @@ interface GameInfo {
   paths?: string[]
   save_games_roots?: Record<string, string>
   current_save_time?: number | null
+  steam_cloud?: boolean
 }
 interface SaveInfo {
   game_info: GameInfo
@@ -119,11 +122,11 @@ async function installedGames(): Promise<GameInfo[]> {
     if (Array.isArray(shortcuts)) for (const shortcut of shortcuts) {
       const id = Number(shortcut?.appid) >>> 0
       if (id && shortcut?.data?.strAppName) games.push({
-        game_id: id, game_name: shortcut.data.strAppName, install_root: steamRoot
+        game_id: id, game_name: shortcut.data.strAppName, install_root: steamRoot, steam_cloud: false
       })
     }
   }
-  return games
+  return games.filter(game => !isCompatibilityTool(game.game_name))
 }
 async function backup(game: GameInfo) {
   await ensureAccount()
@@ -197,8 +200,11 @@ const Content: FC<{ side?: boolean }> = ({ side = false }) => {
     const currentSaves = await rpc<SaveInfo[]>("get_saveinfos")
     setSaves(currentSaves)
     const all = [...new Map([...currentSaves.map(s => s.game_info), ...installed, ...configured].map(g => [g.game_id, g])).values()]
+      .filter(game => !isCompatibilityTool(game.game_name))
       .sort((a, b) => a.game_name.localeCompare(b.game_name, "zh-CN"))
-    setGames(all)
+    const cloudSupport = await call<[number[]], Record<string, boolean>>("get_steam_cloud_support", all.map(g => g.game_id))
+    const groupedGames = all.map(g => ({ ...g, steam_cloud: cloudSupport[String(g.game_id)] ?? g.steam_cloud }))
+    setGames(groupedGames)
     setCustom(configured)
     setSupported(await rpc<GameInfo[]>("find_supported", { game_infos: all }))
     setError("")
@@ -322,12 +328,20 @@ const Content: FC<{ side?: boolean }> = ({ side = false }) => {
       <PanelSectionRow><ButtonItem layout="below" disabled={busy || loading} onClick={() => action(refresh)}>刷新</ButtonItem></PanelSectionRow>
     </PanelSection>
     {error && <p role="alert" style={{ padding: "0 16px", color: "#ffaaaa" }}>加载失败：{error}</p>}
-    <PanelSection title={`游戏（${games.length}）`}>
-      {loading ? <p style={{ padding: "0 16px" }}>正在读取游戏…</p> : games.map(game => <PanelSectionRow key={game.game_id}>
-        <ButtonItem layout="below" disabled={busy} aria-label={`打开游戏存档 ${game.game_id}`} onClick={() => setSelectedGameId(game.game_id)}>{game.game_name}</ButtonItem>
-      </PanelSectionRow>)}
-      {!loading && games.length === 0 && <p style={{ padding: "0 16px" }}>暂无游戏，请刷新列表。</p>}
-    </PanelSection>
+    {loading ? <p style={{ padding: "0 16px" }}>正在读取游戏…</p> : ([
+      { title: "不支持 Steam 云存档", support: false },
+      { title: "支持 Steam 云存档", support: true },
+      { title: "Steam 云支持待确认", support: undefined }
+    ] as const).map(group => {
+      const entries = games.filter(game => game.steam_cloud === group.support)
+      if (!entries.length) return null
+      return <PanelSection key={group.title} title={`${group.title}（${entries.length}）`}>
+        {entries.map(game => <PanelSectionRow key={game.game_id}>
+          <ButtonItem layout="below" disabled={busy} aria-label={`打开游戏存档 ${game.game_id}`} onClick={() => setSelectedGameId(game.game_id)}>{game.game_name}</ButtonItem>
+        </PanelSectionRow>)}
+      </PanelSection>
+    })}
+    {!loading && games.length === 0 && <p style={{ padding: "0 16px" }}>暂无游戏，请刷新列表。</p>}
   </div>
 }
 
@@ -406,6 +420,16 @@ export default definePlugin(() => {
   }
   void observeGames()
   const gameTimer = window.setInterval(() => { void observeGames() }, 2000)
+  const removeLaunchSync = installLaunchSync(SteamClient.Apps as unknown as { RunGame: (...args: unknown[]) => unknown }, async id => {
+    await accountReady
+    const raw = App.m_CurrentUser?.strSteamID || "0"
+    const sid = new SteamID(raw)
+    if (!sid.isValidIndividual()) throw Error("Steam 账号尚未加载，请稍后再试")
+    await rpc("set_account_id", { id_num: sid.accountid })
+    const result = await call<[number], { message: string; synced: boolean }>("cloud_prepare_launch", id)
+    if (App.m_CurrentUser?.strSteamID !== raw) throw Error("Steam 账号已变化，已取消启动")
+    return result
+  }, () => disposed ? "" : App.m_CurrentUser?.strSteamID || "")
   routerHook.addGlobalComponent("UmeYc-SteamBack-Saves", () => <SavesOverlay />)
   return {
     name: "UmeYc-SteamBack",
@@ -414,6 +438,7 @@ export default definePlugin(() => {
     icon: <CloudSaveIcon />,
     onDismount() {
       disposed = true
+      removeLaunchSync()
       window.clearInterval(gameTimer)
       closeSavePages()
       routerHook.removeGlobalComponent("UmeYc-SteamBack-Saves")
