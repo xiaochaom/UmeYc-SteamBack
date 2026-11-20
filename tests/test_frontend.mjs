@@ -82,7 +82,6 @@ async function harness(options = {}) {
         case 'sniff_cancel': return { state: 'idle' };
         case 'find_mounted': return ['/Steam'];
         case 'get_custom_games': return custom;
-        case 'get_steam_cloud_support': return options.cloudSupport || { '42': true };
         case 'cloud_retry_pending': return null;
         case 'cloud_set_auto_download': cloudAutoDownload = args[1]; return cloudAutoDownload;
         case 'cloud_prepare_launch': {
@@ -254,19 +253,20 @@ test('同步期间切换账号或卸载插件不会继续旧启动请求', async
   }
 });
 
-test('兼容层过滤后，不支持 Steam 云的游戏分块显示在支持的上方', async () => {
+test('统一列出 Steam 与非 Steam 游戏，保留兼容层过滤且不判断云支持', async () => {
   const h = await harness({ games: [
-    { nAppID: 42, strAppName: '支持云游戏' }, { nAppID: 43, strAppName: '不支持云游戏' },
+    { nAppID: 42, strAppName: 'DARK SOULS III' }, { nAppID: 43, strAppName: 'Shadows' },
     { nAppID: 44, strAppName: 'Proton - Experimental' }, { nAppID: 45, strAppName: 'GE-Proton9-25' },
     { nAppID: 46, strAppName: 'Steam Linux Runtime 3.0 (sniper)' }, { nAppID: 47, strAppName: 'Proton Pulse' }
-  ], cloudSupport: { '42': true, '43': false, '47': false } });
+  ] });
   const tree = h.render();
   const names = h.nodes(tree).filter(n => n.type === 'ButtonItem').map(n => n.props.children.join(''));
   assert.ok(names.includes('Proton Pulse'));
   for (const name of ['Proton - Experimental', 'GE-Proton9-25', 'Steam Linux Runtime 3.0 (sniper)']) assert.ok(!names.includes(name));
   const headings = h.nodes(tree).filter(n => n.type === 'PanelSection').map(n => n.props.title).filter(Boolean);
-  assert.ok(headings[0].startsWith('不支持 Steam 云存档'));
-  assert.ok(headings[1].startsWith('支持 Steam 云存档'));
+  assert.deepEqual(headings, ['游戏列表（4）']);
+  for (const name of ['DARK SOULS III', 'Shadows', '非 Steam 游戏']) assert.ok(names.includes(name));
+  assert.equal(h.calls.filter(c => c.method === 'get_steam_cloud_support').length, 0);
   h.plugin.onDismount();
 });
 
@@ -299,8 +299,7 @@ test('首页仅刷新与游戏列表，点击游戏打开 Steam 原生存档弹�
   const h = await harness();
   const tree = h.render();
   assert.ok(h.button(tree, '刷新'));
-  assert.ok(h.find(tree, 'PanelSection', p => p.title === '不支持 Steam 云存档（1）'));
-  assert.ok(h.find(tree, 'PanelSection', p => p.title === '支持 Steam 云存档（1）'));
+  assert.ok(h.find(tree, 'PanelSection', p => p.title === '游戏列表（2）'));
   assert.ok(h.button(tree, '测试游戏'));
   assert.ok(h.button(tree, '非 Steam 游戏'));
   assert.equal(h.nodes(tree).filter(n => n.type === 'ToggleField').length, 0);

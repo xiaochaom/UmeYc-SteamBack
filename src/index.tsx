@@ -20,7 +20,6 @@ interface GameInfo {
   paths?: string[]
   save_games_roots?: Record<string, string>
   current_save_time?: number | null
-  steam_cloud?: boolean
 }
 interface SaveInfo {
   game_info: GameInfo
@@ -122,7 +121,7 @@ async function installedGames(): Promise<GameInfo[]> {
     if (Array.isArray(shortcuts)) for (const shortcut of shortcuts) {
       const id = Number(shortcut?.appid) >>> 0
       if (id && shortcut?.data?.strAppName) games.push({
-        game_id: id, game_name: shortcut.data.strAppName, install_root: steamRoot, steam_cloud: false
+        game_id: id, game_name: shortcut.data.strAppName, install_root: steamRoot
       })
     }
   }
@@ -202,9 +201,7 @@ const Content: FC<{ side?: boolean }> = ({ side = false }) => {
     const all = [...new Map([...currentSaves.map(s => s.game_info), ...installed, ...configured].map(g => [g.game_id, g])).values()]
       .filter(game => !isCompatibilityTool(game.game_name))
       .sort((a, b) => a.game_name.localeCompare(b.game_name, "zh-CN"))
-    const cloudSupport = await call<[number[]], Record<string, boolean>>("get_steam_cloud_support", all.map(g => g.game_id))
-    const groupedGames = all.map(g => ({ ...g, steam_cloud: cloudSupport[String(g.game_id)] ?? g.steam_cloud }))
-    setGames(groupedGames)
+    setGames(all)
     setCustom(configured)
     setSupported(await rpc<GameInfo[]>("find_supported", { game_infos: all }))
     setError("")
@@ -328,19 +325,11 @@ const Content: FC<{ side?: boolean }> = ({ side = false }) => {
       <PanelSectionRow><ButtonItem layout="below" disabled={busy || loading} onClick={() => action(refresh)}>刷新</ButtonItem></PanelSectionRow>
     </PanelSection>
     {error && <p role="alert" style={{ padding: "0 16px", color: "#ffaaaa" }}>加载失败：{error}</p>}
-    {loading ? <p style={{ padding: "0 16px" }}>正在读取游戏…</p> : ([
-      { title: "不支持 Steam 云存档", support: false },
-      { title: "支持 Steam 云存档", support: true },
-      { title: "Steam 云支持待确认", support: undefined }
-    ] as const).map(group => {
-      const entries = games.filter(game => game.steam_cloud === group.support)
-      if (!entries.length) return null
-      return <PanelSection key={group.title} title={`${group.title}（${entries.length}）`}>
-        {entries.map(game => <PanelSectionRow key={game.game_id}>
-          <ButtonItem layout="below" disabled={busy} aria-label={`打开游戏存档 ${game.game_id}`} onClick={() => setSelectedGameId(game.game_id)}>{game.game_name}</ButtonItem>
-        </PanelSectionRow>)}
-      </PanelSection>
-    })}
+    {loading ? <p style={{ padding: "0 16px" }}>正在读取游戏…</p> : games.length > 0 && <PanelSection title={`游戏列表（${games.length}）`}>
+      {games.map(game => <PanelSectionRow key={game.game_id}>
+        <ButtonItem layout="below" disabled={busy} aria-label={`打开游戏存档 ${game.game_id}`} onClick={() => setSelectedGameId(game.game_id)}>{game.game_name}</ButtonItem>
+      </PanelSectionRow>)}
+    </PanelSection>}
     {!loading && games.length === 0 && <p style={{ padding: "0 16px" }}>暂无游戏，请刷新列表。</p>}
   </div>
 }
