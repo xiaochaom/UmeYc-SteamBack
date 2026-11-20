@@ -5,11 +5,11 @@ import {
 } from "@decky/ui"
 import { FC, ReactNode, useState, useEffect } from "react"
 import { call, definePlugin, routerHook } from "@decky/api"
-import { FiDownload } from "react-icons/fi"
 import SteamID from "steamid"
 import { PanelDialog } from "./components/panel-dialog"
 import { SavePaths, PathDraft } from "./components/save-paths"
 import { CloudAccount, CloudGame, SniffDialog } from "./components/cloud"
+import { CloudSaveIcon } from "./components/cloud-save-icon"
 
 interface GameInfo {
   game_id: number
@@ -411,7 +411,7 @@ export default definePlugin(() => {
     name: "UmeYc-SteamBack",
     titleView: <div className={quickAccessMenuClasses.Title}>{title}</div>,
     content: <Content />,
-    icon: <FiDownload />,
+    icon: <CloudSaveIcon />,
     onDismount() {
       disposed = true
       window.clearInterval(gameTimer)
