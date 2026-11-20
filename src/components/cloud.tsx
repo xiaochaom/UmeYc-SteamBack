@@ -123,6 +123,16 @@ export const CloudGame: FC<{ game: CloudGameInfo; localTime?: number | null; ava
     } catch (e) { setError(String(e)) }
     finally { setBusy(false) }
   }
+  function manualSync() {
+    showDialog(<ConfirmModal strTitle="手动同步：选择要使用的存档"
+      strDescription={`本地存档时间：${timeText(localTime)}\n云端存档时间：${timeText(state?.cloud_time)}\n选择较新的进度。使用本地会上传并替换云端版本；使用云端会下载并覆盖当前配置路径。`}
+      strOKButtonText="使用本地存档上传" strCancelButtonText="使用云端存档下载"
+      onOK={() => start('upload', state?.revision)} onCancel={() => {
+        if (state?.revision) void start('download', state.revision)
+        else setError('云端暂无存档，无法下载')
+      }} />)
+  }
+
   return <div aria-label="云存档管理">
     <div style={textStyle}>{`云端存档时间：${state?.error ? '读取失败，请刷新' : state ? timeText(state.cloud_time) : '正在读取…'}`}</div>
     {state?.uploaded_at != null && <div style={textStyle}>{`最近上传时间：${timeText(state.uploaded_at)}`}</div>}
@@ -135,6 +145,8 @@ export const CloudGame: FC<{ game: CloudGameInfo; localTime?: number | null; ava
     <Focusable flow-children="row" style={rowStyle}>
       <DialogButton style={buttonStyle} disabled={working || !state?.logged_in || !available || running(game.game_id)}
         onClick={() => start('upload')}>本地同步到云端</DialogButton>
+      <DialogButton style={buttonStyle} disabled={working || !state?.logged_in || running(game.game_id)}
+        onClick={manualSync}>手动同步</DialogButton>
       <DialogButton style={buttonStyle} disabled={working || !state?.logged_in || !state.revision || !hasPath || running(game.game_id)} onClick={() => showDialog(
         <ConfirmModal strTitle="云端同步到本地" strDescription={`本地存档：${timeText(localTime)}\n云端存档：${timeText(state?.cloud_time)}\n将覆盖当前配置路径中的对应文件。请确认自选路径与上传时的路径顺序一致；本地列表会保留“云端下载”和“同步前本地备份”，后者保存覆盖前的本地进度。`}
           strOKButtonText="确认同步" strCancelButtonText="取消" onOK={() => start('download', state?.revision)} />

@@ -409,12 +409,14 @@ export default definePlugin(() => {
         observedAccount = raw
         observed = next
         await call<[number[]], void>("sync_running_games", [...next])
+        await call<[], void>("cloud_retry_pending")
         return
       }
       // Notify exits before the next full running snapshot can discard them.
       for (const id of observed) if (!next.has(id)) await call<[number, boolean], void>("game_lifetime", id, false)
       for (const id of next) if (!observed.has(id)) await call<[number, boolean], void>("game_lifetime", id, true)
       observed = next
+      await call<[], void>("cloud_retry_pending")
     } catch (e) { report(e) }
     finally { scanning = false }
   }

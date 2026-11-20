@@ -130,6 +130,9 @@ class Plugin:
         for game_id in after - before:
             await self.game_lifetime(game_id, True)
 
+    async def cloud_retry_pending(self):
+        await get_cloud().retry_uploads(current_account())
+
     async def game_lifetime(self, game_id: int, running: bool):
         account = current_account()
         service = get_cloud()

@@ -83,6 +83,7 @@ async function harness(options = {}) {
         case 'find_mounted': return ['/Steam'];
         case 'get_custom_games': return custom;
         case 'get_steam_cloud_support': return options.cloudSupport || { '42': true };
+        case 'cloud_retry_pending': return null;
         case 'cloud_set_auto_download': cloudAutoDownload = args[1]; return cloudAutoDownload;
         case 'cloud_prepare_launch': {
           if (options.prepareLaunch) return options.prepareLaunch(args[0]);
@@ -585,10 +586,13 @@ test('插件关闭页面后仍观察游戏退出，卸载时停止观察', async
   assert.equal(h.calls.filter(c => c.method === 'game_lifetime' && c.args[1] === false).length, 1);
   await h.tick();
   assert.equal(h.calls.filter(c => c.method === 'game_lifetime' && c.args[1] === false).length, 1);
+  const retries = h.calls.filter(c => c.method === 'cloud_retry_pending').length;
+  assert.ok(retries > 1);
   h.plugin.onDismount();
   const count = h.calls.filter(c => c.method === 'game_lifetime').length;
   h.running.push({ appid: '42' }); await h.tick();
   assert.equal(h.calls.filter(c => c.method === 'game_lifetime').length, count);
+  assert.equal(h.calls.filter(c => c.method === 'cloud_retry_pending').length, retries);
 });
 
 test('嗅探先记录基线，再展示变更候选，用户确认前不会配置路径', async () => {

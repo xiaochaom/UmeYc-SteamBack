@@ -15,7 +15,10 @@ import uuid
 from zipfile import ZipFile, ZIP_DEFLATED, BadZipFile
 
 from .custom import safe_file, write_json
+from .retry_queue import UploadQueue
 from .quark import QuarkClient, QuarkError, LoginExpired
+
+CURRENT_BASELINE = object()
 
 MAX_BYTES = 2 * 1024**3
 MAX_FILES = 50000
@@ -179,6 +182,8 @@ class CloudService:
         self.lock = threading.RLock()
         self.state_path = Path(engine.config.app_data_dir) / "cloud_settings.json"
         self.activity_path = Path(engine.config.app_data_dir) / "cloud_activity.json"
+        self.retry_queue = UploadQueue(Path(engine.config.app_data_dir))
+        self.retry_lock = threading.RLock()
         self.jobs = {}
         self.tasks = set()
         self.running = set()
@@ -281,7 +286,7 @@ class CloudService:
             auth = self.account_status()
             key = self.key(account, game)
             entry = self.read_state().get(key, {})
-            activity = job or self.read_state(self.activity_path).get(key)
+            activity = self.read_state(self.activity_path).get(key) or job
             result = {**auth, "auto_upload": entry.get("auto_upload", False),
                       "auto_download": entry.get("auto_download", False), "auto_sync": entry.get("auto_sync", False), "activity": activity,
                       "cloud_time": None, "uploaded_at": None, "revision": None}
@@ -300,6 +305,8 @@ class CloudService:
         state = self.read_state()
         state.setdefault(self.key(account, game), {})["synced_hash"] = content_hash
         write_json(self.state_path, state)
+        with self.retry_lock:
+            self.retry_queue.clear(self.uid, account, game["game_id"])
 
     def _prune_versions(self, account, game, folder, before, retained):
         """只清理同步前已存在的旧文件，保护其他设备正在上传的新文件。"""
@@ -363,7 +370,7 @@ class CloudService:
         except (ValueError, OSError, KeyError, TypeError):
             return warning
 
-    def upload(self, account, game, expected_revision=None, expected_uid=None):
+    def upload(self, account, game, expected_revision=None, expected_uid=None, base_hash=CURRENT_BASELINE):
         with self.lock:
             auth = self.client.account(); self.uid = auth["user_id"]
             if expected_uid is not None and self.uid != expected_uid:
@@ -383,7 +390,10 @@ class CloudService:
                     self.remember(account, game, manifest["content_hash"])
                     warning = self._prune_versions(account, game, folder, before, remote)
                     return {"message": warning or "本地与云端存档内容一致，无需重复上传；云端仅保留最新一份"}
-                previous = self.read_state().get(self.key(account, game), {}).get("synced_hash")
+                previous = (self.read_state().get(self.key(account, game), {}).get("synced_hash")
+                            if base_hash is CURRENT_BASELINE else base_hash)
+                if base_hash is not CURRENT_BASELINE and previous is not None and remote is None:
+                    raise CloudConflict({"revision": None, "save_time": None})
                 if remote and remote["content_hash"] != previous and expected_revision != remote["revision"]:
                     raise CloudConflict(remote)
                 if expected_revision is not None and (remote or {}).get("revision") != expected_revision:
@@ -474,7 +484,7 @@ class CloudService:
             state[key] = value
             write_json(self.activity_path, state)
 
-    def start_job(self, account, game, direction, revision=None, automatic=False):
+    def start_job(self, account, game, direction, revision=None, automatic=False, retry_item=None):
         self.isolated_engine(account)
         if direction not in ("upload", "download"):
             raise ValueError("无效的同步方向")
@@ -484,6 +494,14 @@ class CloudService:
             raise ValueError("已有同步任务，请等待完成")
         if any(j["state"] == "running" and j["account"] == account and j["game_id"] == int(game["game_id"]) for j in self.jobs.values()):
             raise ValueError("当前游戏已有同步任务")
+        if automatic:
+            with self.retry_lock:
+                if retry_item is None:
+                    baseline = self.read_state().get(self.key(account, game), {}).get("synced_hash")
+                    retry_item = self.retry_queue.enqueue(self.uid, account, copy.deepcopy(game), baseline)
+                if retry_item.get("blocked"):
+                    activity = self.read_state(self.activity_path).get(self.key(account, game), {})
+                    return {**activity, "state": "conflict", "message": "云端存在不同进度，已暂停补传，请手动选择同步方向"}
         # Bound retained job summaries; running tasks always remain addressable.
         if len(self.jobs) >= 30:
             self.jobs = {k: v for k, v in self.jobs.items() if v["state"] == "running"}
@@ -491,7 +509,7 @@ class CloudService:
         job = {"id": job_id, "state": "running", "message": "等待存档稳定…" if automatic else "正在同步…",
                "account": account, "game_id": int(game["game_id"]), "uid": self.uid}
         self.jobs[job_id] = job
-        task = asyncio.create_task(self._queued_job(job, account, copy.deepcopy(game), direction, revision, automatic))
+        task = asyncio.create_task(self._queued_job(job, account, copy.deepcopy(game), direction, revision, automatic, retry_item))
         self.tasks.add(task); task.add_done_callback(self.tasks.discard)
         return dict(job)
 
@@ -499,9 +517,14 @@ class CloudService:
         async with self.job_gate:
             await self._run_job(*args)
 
-    async def _run_job(self, job, account, game, direction, revision, automatic):
+    async def _run_job(self, job, account, game, direction, revision, automatic, retry_item=None):
         try:
             if automatic:
+                with self.retry_lock:
+                    pending = self.retry_queue.pending.get(self.retry_queue.key(job["uid"], account, game["game_id"]))
+                    if (not pending or pending.get("token") != retry_item.get("token")
+                            or self.uid != job["uid"] or not self.auto_game(account, game["game_id"])):
+                        raise ValueError("自动上传已取消或账号已变化")
                 # Wait for the exiting game/Steam Cloud to finish writing.
                 previous = None
                 for _ in range(15):
@@ -520,16 +543,44 @@ class CloudService:
                 else:
                     raise ValueError("存档仍在变化，已跳过自动上传，请稍后手动同步")
             if direction == "upload":
-                result = await asyncio.to_thread(self.upload, account, game, revision, job["uid"])
+                result = await asyncio.to_thread(self.upload, account, game, revision, job["uid"],
+                                                 base_hash=retry_item.get("base_hash") if automatic else CURRENT_BASELINE)
             else:
                 result = await asyncio.to_thread(lambda: asyncio.run(self.download(account, game, revision, job["uid"])))
             job.update(state="done", **result)
+            if automatic:
+                with self.retry_lock:
+                    self.retry_queue.finish(retry_item)
         except CloudConflict as error:
-            job.update(state="conflict", message=str(error), revision=error.remote.get("revision"), cloud_time=error.remote.get("save_time"))
+            if automatic:
+                with self.retry_lock:
+                    self.retry_queue.finish(retry_item, error, conflict=True)
+            job.update(state="conflict", message=str(error) + ("；已暂停自动补传，请手动选择同步方向" if automatic else ""), revision=error.remote.get("revision"), cloud_time=error.remote.get("save_time"))
         except Exception as error:
-            job.update(state="error", message=str(error) if isinstance(error, ValueError) else "同步失败，请重试；本地备份和旧云端版本保留")
+            if automatic:
+                with self.retry_lock:
+                    self.retry_queue.finish(retry_item, error)
+            message = str(error) if isinstance(error, ValueError) else "同步失败，本地备份和旧云端版本保留"
+            job.update(state="error", message=message + ("；任务已保留，稍后重新检查云端并补传" if automatic else ""))
         await asyncio.to_thread(self.record_activity, account, game,
                                 {k: v for k, v in job.items() if k not in ("account", "game_id", "uid")}, job["uid"])
+
+    async def retry_uploads(self, account):
+        # Called only after the frontend supplied a complete running snapshot.
+        # Queue inspection is local; network work remains in serialized jobs.
+        def due():
+            if not self.uid or self.active_account not in (None, account):
+                return None
+            with self.retry_lock:
+                for item in list(self.retry_queue.pending.values()):
+                    if item["uid"] == self.uid and item["account"] == account:
+                        if not self.auto_game(account, item["game"]["game_id"]):
+                            self.retry_queue.clear(self.uid, account, item["game"]["game_id"])
+                running = {aid for acct, aid in self.running if acct == account}
+                return self.retry_queue.next(self.uid, account, running)
+        item = await asyncio.to_thread(due)
+        if item and not any(j["state"] == "running" for j in self.jobs.values()):
+            self.start_job(account, item["game"], "upload", automatic=True, retry_item=item)
 
     def auto_game(self, account, game_id):
         # Atomic JSON replacement lets the lifecycle observer read this without
@@ -552,6 +603,9 @@ class CloudService:
                 auto_sync=enabled, auto_download=enabled, auto_upload=enabled,
                 game={k: game[k] for k in ("game_id", "game_name", "install_root")})
             write_json(self.state_path, state)
+            if not enabled:
+                with self.retry_lock:
+                    self.retry_queue.clear(self.uid, account, game["game_id"])
             return enabled
 
     def set_auto_download(self, account, game, enabled):

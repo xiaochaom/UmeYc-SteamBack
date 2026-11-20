@@ -247,6 +247,7 @@ class CloudSync(unittest.IsolatedAsyncioTestCase):
         self.assertIn('登录', self.service.jobs[job['id']]['message'])
 
     async def test_automatic_upload_waits_for_stable_files_and_rejects_restart(self):
+        self.service.set_auto_sync(123, self.game, True)
         async def immediate(_):
             pass
         with patch('steamback.cloud.asyncio.sleep', immediate):
